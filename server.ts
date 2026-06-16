@@ -105,8 +105,8 @@ async function handleRequest(req: any, res: any) {
 
     // GET /api/profile - ดึงข้อมูล profile
     if (path === '/api/profile' && method === 'GET') {
-      const profile = db.prepare('SELECT * FROM profile LIMIT 1').get();
-      const socialLinks = db.prepare('SELECT * FROM social_links WHERE is_active = 1 ORDER BY sort_order').all();
+      const profile = db.prepare('SELECT id, name, title, bio, tagline, location, website, avatar_url, header_image_url FROM profile LIMIT 1').get();
+      const socialLinks = db.prepare('SELECT id, platform, url, username, display_name, description, is_primary FROM social_links WHERE is_active = 1 ORDER BY sort_order').all();
       return sendJson(res, { profile, socialLinks }, 200, req);
     }
 
@@ -152,7 +152,7 @@ async function handleRequest(req: any, res: any) {
       const type = url.searchParams.get('type');
       const status = url.searchParams.get('status');
 
-      let query = 'SELECT * FROM assets WHERE 1=1';
+      let query = 'SELECT id, name, type, description, url, platform, status, views, subscribers, revenue FROM assets WHERE 1=1';
       const args: any[] = [];
 
       if (type) { query += ' AND type = ?'; args.push(type); }
@@ -168,7 +168,7 @@ async function handleRequest(req: any, res: any) {
       const type = url.searchParams.get('type');
       const limit = parseInt(url.searchParams.get('limit') || '20');
 
-      let query = 'SELECT * FROM content WHERE status = ?';
+      let query = 'SELECT id, title, slug, content_type, summary, status, published_at, platforms, canonical_url, views, shares FROM content WHERE status = ?';
       const args: any[] = ['published'];
 
       if (type) { query += ' AND content_type = ?'; args.push(type); }
@@ -183,7 +183,7 @@ async function handleRequest(req: any, res: any) {
     // GET /api/content/:slug - ดึง content เดียว
     if (path.match(/^\/api\/content\/[\w-]+$/) && method === 'GET') {
       const slug = path.split('/').pop();
-      const item = db.prepare('SELECT * FROM content WHERE slug = ? AND status = ?').get(slug, 'published');
+      const item = db.prepare('SELECT id, title, slug, content_type, summary, body_html, status, published_at, platforms, canonical_url, views, shares FROM content WHERE slug = ? AND status = ?').get(slug, 'published');
 
       if (!item) return sendJson(res, { error: 'Not found' }, 404, req);
       return sendJson(res, { content: item }, 200, req);
