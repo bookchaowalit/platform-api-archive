@@ -17,6 +17,14 @@ const PYTHON_WRAPPER = join(PROJECT_ROOT, 'infra', 'scripts', 'setup', 'run-pyth
 const INTEGRATION_HEALTH_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'integration_health.py');
 const EXTERNAL_DISCOVERY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'discover_external_apps.py');
 const SENTRY_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'sentry_readonly.py');
+const POSTHOG_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'posthog_readonly.py');
+const SLACK_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'slack_readonly.py');
+const NOTION_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'notion_readonly.py');
+const ASANA_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'asana_readonly.py');
+const LINEAR_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'linear_readonly.py');
+const DISCORD_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'discord_readonly.py');
+const WHATSAPP_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'whatsapp_business_readonly.py');
+const MICROSOFT_GRAPH_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'microsoft_graph_readonly.py');
 const INTEGRATION_HEALTH_TIMEOUT_MS = Math.min(
   Math.max(Number(process.env.INTEGRATION_HEALTH_TIMEOUT_MS || 120000), 1000),
   300000,
@@ -27,6 +35,38 @@ const EXTERNAL_DISCOVERY_TIMEOUT_MS = Math.min(
 );
 const SENTRY_READONLY_TIMEOUT_MS = Math.min(
   Math.max(Number(process.env.SENTRY_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const POSTHOG_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.POSTHOG_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const SLACK_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.SLACK_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const NOTION_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.NOTION_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const ASANA_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.ASANA_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const LINEAR_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.LINEAR_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const DISCORD_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.DISCORD_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const WHATSAPP_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.WHATSAPP_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const MICROSOFT_GRAPH_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.MICROSOFT_GRAPH_READONLY_TIMEOUT_MS || 30000), 1000),
   120000,
 );
 
@@ -227,6 +267,184 @@ async function runSentryIssues(limit: number, offline: boolean) {
   }
 }
 
+async function runPostHogInsights(limit: number, offline: boolean) {
+  const args = [POSTHOG_READONLY_SCRIPT, '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: POSTHOG_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[posthog-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'PostHog read-only API timed out');
+    }
+    throw new HttpError(502, 'PostHog read-only API unavailable');
+  }
+}
+
+async function runSlackChannels(limit: number, offline: boolean) {
+  const args = [SLACK_READONLY_SCRIPT, '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: SLACK_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[slack-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Slack read-only API timed out');
+    }
+    throw new HttpError(502, 'Slack read-only API unavailable');
+  }
+}
+
+async function runNotionSearch(limit: number, query: string, offline: boolean) {
+  const args = [NOTION_READONLY_SCRIPT, '--limit', String(limit), '--json'];
+  if (query) args.push('--query', query);
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: NOTION_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[notion-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Notion read-only API timed out');
+    }
+    throw new HttpError(502, 'Notion read-only API unavailable');
+  }
+}
+
+async function runAsana(resource: 'workspaces' | 'projects', limit: number, workspace: string, offline: boolean) {
+  const args = [ASANA_READONLY_SCRIPT, '--resource', resource, '--limit', String(limit), '--json'];
+  if (workspace) args.push('--workspace', workspace);
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: ASANA_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[asana-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Asana read-only API timed out');
+    }
+    throw new HttpError(502, 'Asana read-only API unavailable');
+  }
+}
+
+async function runLinear(resource: 'teams' | 'projects', limit: number, offline: boolean) {
+  const args = [LINEAR_READONLY_SCRIPT, '--resource', resource, '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: LINEAR_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[linear-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Linear read-only API timed out');
+    }
+    throw new HttpError(502, 'Linear read-only API unavailable');
+  }
+}
+
+async function runDiscordGuilds(limit: number, offline: boolean) {
+  const args = [DISCORD_READONLY_SCRIPT, '--resource', 'guilds', '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: DISCORD_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[discord-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Discord read-only API timed out');
+    }
+    throw new HttpError(502, 'Discord read-only API unavailable');
+  }
+}
+
+async function runWhatsAppPhoneNumbers(limit: number, offline: boolean) {
+  const args = [WHATSAPP_READONLY_SCRIPT, '--resource', 'phone-numbers', '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: WHATSAPP_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[whatsapp-business-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'WhatsApp Business read-only API timed out');
+    }
+    throw new HttpError(502, 'WhatsApp Business read-only API unavailable');
+  }
+}
+
+async function runMicrosoftGraphProfile(offline: boolean) {
+  const args = [MICROSOFT_GRAPH_READONLY_SCRIPT, '--resource', 'me', '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: MICROSOFT_GRAPH_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[microsoft-graph-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Microsoft Graph read-only API timed out');
+    }
+    throw new HttpError(502, 'Microsoft Graph read-only API unavailable');
+  }
+}
+
 // =====================================================
 // ROUTES
 // =====================================================
@@ -404,6 +622,176 @@ async function handleRequest(req: any, res: any) {
       const offline = url.searchParams.get('offline') === 'true';
       const issues = await runSentryIssues(limit, offline);
       return sendJson(res, issues, 200, req);
+    }
+
+    // GET /api/integrations/posthog/insights - bounded, read-only metadata.
+    // This is authenticated because insight names and descriptions can be private.
+    if (path === '/api/integrations/posthog/insights' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const insights = await runPostHogInsights(limit, offline);
+      return sendJson(res, insights, 200, req);
+    }
+
+    // GET /api/integrations/slack/channels - bounded public-channel metadata.
+    // This is authenticated and never reads messages or performs mutations.
+    if (path === '/api/integrations/slack/channels' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const channels = await runSlackChannels(limit, offline);
+      return sendJson(res, channels, 200, req);
+    }
+
+    // GET /api/integrations/notion/search - bounded metadata-only inventory.
+    // This is authenticated and never reads block content or performs mutations.
+    if (path === '/api/integrations/notion/search' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const query = (url.searchParams.get('query') || '').trim();
+      if (query.length > 100) {
+        return sendJson(res, { error: 'query must be at most 100 characters' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const results = await runNotionSearch(limit, query, offline);
+      return sendJson(res, results, 200, req);
+    }
+
+    // GET /api/integrations/asana/workspaces - bounded workspace metadata.
+    if (path === '/api/integrations/asana/workspaces' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const workspaces = await runAsana('workspaces', limit, '', offline);
+      return sendJson(res, workspaces, 200, req);
+    }
+
+    // GET /api/integrations/asana/projects - bounded project metadata.
+    // A workspace GID is required to avoid unbounded cross-domain queries.
+    if (path === '/api/integrations/asana/projects' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const workspace = (url.searchParams.get('workspace') || '').trim();
+      if (!/^[A-Za-z0-9_-]{1,100}$/.test(workspace)) {
+        return sendJson(res, { error: 'workspace must be a valid Asana workspace GID' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const projects = await runAsana('projects', limit, workspace, offline);
+      return sendJson(res, projects, 200, req);
+    }
+
+    // GET /api/integrations/linear/teams - bounded team metadata.
+    if (path === '/api/integrations/linear/teams' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const teams = await runLinear('teams', limit, offline);
+      return sendJson(res, teams, 200, req);
+    }
+
+    // GET /api/integrations/linear/projects - bounded project metadata.
+    if (path === '/api/integrations/linear/projects' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const projects = await runLinear('projects', limit, offline);
+      return sendJson(res, projects, 200, req);
+    }
+
+    // GET /api/integrations/discord/guilds - bounded partial guild metadata.
+    // This is authenticated and never reads messages or performs mutations.
+    if (path === '/api/integrations/discord/guilds' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const guilds = await runDiscordGuilds(limit, offline);
+      return sendJson(res, guilds, 200, req);
+    }
+
+    // GET /api/integrations/whatsapp-business/phone-numbers - bounded WABA metadata.
+    // This is authenticated and never reads messages or performs mutations.
+    if (path === '/api/integrations/whatsapp-business/phone-numbers' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const phoneNumbers = await runWhatsAppPhoneNumbers(limit, offline);
+      return sendJson(res, phoneNumbers, 200, req);
+    }
+
+    // GET /api/integrations/microsoft-graph/me - bounded signed-in-user metadata.
+    // This is authenticated and never reads mail, files, calendar, Teams, or mutates Graph.
+    if (path === '/api/integrations/microsoft-graph/me' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const profile = await runMicrosoftGraphProfile(offline);
+      return sendJson(res, profile, 200, req);
     }
 
     // POST /api/webhook/line - LINE signs this public ingress instead of using
