@@ -45,7 +45,7 @@ export const EXTERNAL_APP_REGISTRY: ExternalAppRecord[] = [
   { id: 'zoom', name: 'Zoom', category: 'communication', status: 'live', apiDocs: 'https://developers.zoom.us/docs/api/', note: 'Read-only authenticated-user profile metadata' },
   { id: 'asana', name: 'Asana', category: 'project-management', status: 'live', apiDocs: 'https://developers.asana.com/docs' },
   { id: 'linear', name: 'Linear', category: 'project-management', status: 'live', apiDocs: 'https://linear.app/developers/graphql' },
-  { id: 'monday', name: 'monday.com', category: 'project-management', status: 'planned', apiDocs: 'https://developer.monday.com/api-reference/docs' },
+  { id: 'monday', name: 'monday.com', category: 'project-management', status: 'live', apiDocs: 'https://developer.monday.com/api-reference/docs', note: 'Read-only board metadata' },
   { id: 'clickup', name: 'ClickUp', category: 'project-management', status: 'planned', apiDocs: 'https://developer.clickup.com/' },
   { id: 'trello', name: 'Trello', category: 'project-management', status: 'planned', apiDocs: 'https://developer.atlassian.com/cloud/trello/rest/' },
   { id: 'jira', name: 'Jira', category: 'project-management', status: 'planned', apiDocs: 'https://developer.atlassian.com/cloud/jira/platform/rest/v3/' },

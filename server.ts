@@ -7,6 +7,7 @@ import { join } from 'path';
 import { EXTERNAL_APP_REGISTRY, EXTERNAL_INTEGRATIONS, sanitizeIntegrationHealth } from './integrations.js';
 import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
 import { verifyStripeSignature } from './stripe.js';
+import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
 
 const PORT = process.env.PORT || 3001;
 const API_TOKEN = process.env.API_TOKEN || '';  // Bearer token for write routes
@@ -26,6 +27,7 @@ const DISCORD_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', '
 const WHATSAPP_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'whatsapp_business_readonly.py');
 const MICROSOFT_GRAPH_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'microsoft_graph_readonly.py');
 const ZOOM_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'zoom_readonly.py');
+const MONDAY_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'monday_readonly.py');
 const INTEGRATION_HEALTH_TIMEOUT_MS = Math.min(
   Math.max(Number(process.env.INTEGRATION_HEALTH_TIMEOUT_MS || 120000), 1000),
   300000,
@@ -72,6 +74,10 @@ const MICROSOFT_GRAPH_READONLY_TIMEOUT_MS = Math.min(
 );
 const ZOOM_READONLY_TIMEOUT_MS = Math.min(
   Math.max(Number(process.env.ZOOM_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+const MONDAY_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.MONDAY_READONLY_TIMEOUT_MS || 30000), 1000),
   120000,
 );
 
@@ -139,6 +145,45 @@ function sendJson(res: any, data: any, status = 200, req?: any) {
     : { ...corsHeaders, 'Access-Control-Allow-Origin': '*' };
   res.writeHead(status, headers);
   res.end(JSON.stringify(data));
+}
+
+function recordAiTelemetry(db: any, event: AiTelemetryEvent): void {
+  db.prepare(`
+    INSERT INTO ai_run_telemetry
+      (run_id, route, prompt_version, provider, model, input_tokens,
+       output_tokens, total_tokens, token_budget, latency_ms,
+       estimated_cost_usd, cache_hit, status, metadata_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(run_id) DO UPDATE SET
+      route=excluded.route,
+      prompt_version=excluded.prompt_version,
+      provider=excluded.provider,
+      model=excluded.model,
+      input_tokens=excluded.input_tokens,
+      output_tokens=excluded.output_tokens,
+      total_tokens=excluded.total_tokens,
+      token_budget=excluded.token_budget,
+      latency_ms=excluded.latency_ms,
+      estimated_cost_usd=excluded.estimated_cost_usd,
+      cache_hit=excluded.cache_hit,
+      status=excluded.status,
+      metadata_json=excluded.metadata_json
+  `).run(
+    event.run_id,
+    event.route,
+    event.prompt_version,
+    event.provider,
+    event.model,
+    event.input_tokens,
+    event.output_tokens,
+    event.total_tokens,
+    event.token_budget,
+    event.latency_ms,
+    event.estimated_cost_usd,
+    event.cache_hit ? 1 : 0,
+    event.status,
+    JSON.stringify(event.metadata),
+  );
 }
 
 function parseBody(req: any): Promise<any> {
@@ -472,6 +517,28 @@ async function runZoomProfile(offline: boolean) {
   }
 }
 
+async function runMondayBoards(limit: number, offline: boolean) {
+  const args = [MONDAY_READONLY_SCRIPT, '--resource', 'boards', '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: MONDAY_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[monday-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'monday.com read-only API timed out');
+    }
+    throw new HttpError(502, 'monday.com read-only API unavailable');
+  }
+}
+
 // =====================================================
 // ROUTES
 // =====================================================
@@ -491,6 +558,37 @@ async function handleRequest(req: any, res: any) {
   const db = await getDb();
 
   try {
+    // Central AI Gateway: all hosted generation is authenticated, bounded,
+    // provider-neutral, and opt-in. Prompt/response bodies never enter telemetry.
+    if (path === '/api/ai/status' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      return sendJson(res, getAiGatewayStatus(), 200, req);
+    }
+
+    if (path === '/api/ai/generate' && method === 'POST') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const body = await parseBody(req);
+      try {
+        const result = await generateAi(body);
+        recordAiTelemetry(db, result.telemetry);
+        return sendJson(res, result.response, 200, req);
+      } catch (error) {
+        if (error instanceof AiGatewayError && error.telemetry) {
+          recordAiTelemetry(db, error.telemetry);
+        }
+        if (error instanceof AiGatewayError) {
+          throw new HttpError(error.status, error.message);
+        }
+        throw error;
+      }
+    }
+
     // =====================================================
     // PUBLIC API: สำหรับ landing page ดึงข้อมูลไปแสดง
     // =====================================================
@@ -831,6 +929,23 @@ async function handleRequest(req: any, res: any) {
       const offline = url.searchParams.get('offline') === 'true';
       const profile = await runZoomProfile(offline);
       return sendJson(res, profile, 200, req);
+    }
+
+    // GET /api/integrations/monday/boards - bounded board metadata.
+    // This is authenticated and never reads items or performs mutations.
+    if (path === '/api/integrations/monday/boards' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const boards = await runMondayBoards(limit, offline);
+      return sendJson(res, boards, 200, req);
     }
 
     // POST /api/webhook/line - LINE signs this public ingress instead of using

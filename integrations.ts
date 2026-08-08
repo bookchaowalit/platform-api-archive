@@ -36,6 +36,7 @@ export const EXTERNAL_INTEGRATIONS: ExternalIntegrationDescriptor[] = [
   { id: 'whatsapp-business', name: 'WhatsApp Business', icon: '🟢', state: 'active', healthCheck: 'live', boundary: 'whatsapp-business-api' },
   { id: 'microsoft-graph', name: 'Microsoft Graph', icon: '🔷', state: 'active', healthCheck: 'live', boundary: 'microsoft-graph-user-api' },
   { id: 'zoom', name: 'Zoom', icon: '📹', state: 'active', healthCheck: 'live', boundary: 'zoom-user-api' },
+  { id: 'monday', name: 'monday.com', icon: '🟨', state: 'active', healthCheck: 'live', boundary: 'monday-boards-api' },
   { id: 'leantime', name: 'Leantime', icon: '📋', state: 'active', healthCheck: 'live', boundary: 'remote-mcp' },
   { id: 'todoist', name: 'Todoist', icon: '✅', state: 'active', healthCheck: 'live', boundary: 'todoist' },
   { id: 'strava', name: 'Strava', icon: '🏃', state: 'paused', healthCheck: 'paused', boundary: 'strava' },

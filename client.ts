@@ -61,6 +61,37 @@ export interface SentryIssuesReport {
   offline?: boolean;
 }
 
+export type AiProfile = 'fast' | 'balanced' | 'quality';
+export type AiPrivacyClass = 'public' | 'internal' | 'private' | 'restricted';
+export interface AiMessage { role: 'system' | 'user' | 'assistant'; content: string; }
+export interface AiGatewayStatus {
+  contract: 'solo-empire.ai-gateway.v1';
+  configured: boolean;
+  provider: string | null;
+  adapter: 'openai-compatible' | 'none';
+  base_url_configured: boolean;
+  api_key_configured: boolean;
+  models: Record<AiProfile, string | null>;
+  limits: { max_context_chars: number; max_output_tokens: number; default_token_budget: number; timeout_ms: number };
+  reason?: string;
+}
+export interface AiGenerateResponse {
+  contract: 'solo-empire.ai-gateway.v1';
+  run_id: string;
+  status: 'success' | 'budget_exceeded';
+  route: string;
+  prompt_version: string;
+  provider: string;
+  model: string;
+  content: string;
+  output_trust: 'untrusted_model_output';
+  finish_reason: string | null;
+  usage: { input_tokens: number | null; output_tokens: number | null; total_tokens: number | null; source: 'provider' | 'estimated' | 'unavailable' };
+  token_budget: number;
+  latency_ms: number;
+  estimated_cost_usd: number | null;
+}
+
 export interface PostHogInsightSummary {
   id: string | number;
   name: string;
@@ -290,6 +321,25 @@ export interface ZoomReadOnlyReport {
   offline?: boolean;
 }
 
+export interface MondayBoardSummary {
+  id: string;
+  name?: string;
+  state?: string;
+}
+
+export interface MondayReadOnlyReport {
+  service: 'monday';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  resource: 'boards';
+  timestamp: string;
+  boards: MondayBoardSummary[];
+  limit?: number;
+  returned?: number;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
 export interface Profile {
   id: number;
   name: string | null;
@@ -464,6 +514,54 @@ class SoloEmpireAPI {
     return this.fetch('/api/integrations');
   }
 
+  async getAiGatewayStatus(options: { token: string }): Promise<AiGatewayStatus> {
+    return this.fetch('/api/ai/status', { Authorization: `Bearer ${options.token}` });
+  }
+
+  async generateAi(options: {
+    token: string;
+    route: string;
+    prompt_version: string;
+    messages: AiMessage[];
+    profile?: AiProfile;
+    privacy_class?: AiPrivacyClass;
+    token_budget?: number;
+    max_output_tokens?: number;
+    temperature?: number;
+  }): Promise<AiGenerateResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
+    try {
+      const response = await fetch(`${this.baseUrl}/api/ai/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${options.token}`,
+        },
+        body: JSON.stringify({
+          route: options.route,
+          prompt_version: options.prompt_version,
+          messages: options.messages,
+          profile: options.profile,
+          privacy_class: options.privacy_class,
+          token_budget: options.token_budget,
+          max_output_tokens: options.max_output_tokens,
+          temperature: options.temperature,
+        }),
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        let detail = '';
+        try { detail = ((await response.json()) as { error?: string }).error || ''; } catch { /* status is enough */ }
+        throw new Error(`API error: ${response.status}${detail ? `: ${detail}` : ''}`);
+      }
+      return await response.json() as AiGenerateResponse;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async getIntegrationHealth(options: { token: string; offline?: boolean }): Promise<{
     timestamp: string;
     total_integrations: number;
@@ -624,6 +722,18 @@ class SoloEmpireAPI {
     if (options.offline) params.set('offline', 'true');
     const query = params.toString();
     return this.fetch(`/api/integrations/zoom/me${query ? `?${query}` : ''}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getMondayBoards(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<MondayReadOnlyReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/monday/boards?${params.toString()}`, {
       Authorization: `Bearer ${options.token}`,
     });
   }
