@@ -61,6 +61,235 @@ export interface SentryIssuesReport {
   offline?: boolean;
 }
 
+export interface PostHogInsightSummary {
+  id: string | number;
+  name: string;
+  short_id?: string;
+  derived_name?: string;
+  description?: string;
+  created_at?: string;
+  updated_at?: string;
+  last_viewed_at?: string;
+  last_refresh?: string;
+  deleted?: boolean;
+  favorited?: boolean;
+  is_sample?: boolean;
+  tags?: string[];
+}
+
+export interface PostHogInsightsReport {
+  service: 'posthog';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  timestamp: string;
+  insights: PostHogInsightSummary[];
+  project_id?: string;
+  limit?: number;
+  returned?: number;
+  total_count?: number;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface SlackChannelSummary {
+  id: string;
+  name: string;
+  is_channel?: boolean;
+  is_private?: boolean;
+  is_archived?: boolean;
+  is_member?: boolean;
+  is_shared?: boolean;
+  is_ext_shared?: boolean;
+  num_members?: number;
+}
+
+export interface SlackChannelsReport {
+  service: 'slack';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  timestamp: string;
+  channels: SlackChannelSummary[];
+  workspace?: string;
+  team_id?: string;
+  limit?: number;
+  returned?: number;
+  has_more?: boolean;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface NotionSearchResult {
+  id: string;
+  object: string;
+  created_time?: string;
+  last_edited_time?: string;
+  url?: string;
+  public_url?: string;
+  in_trash?: boolean;
+  is_archived?: boolean;
+  is_locked?: boolean;
+  parent?: {
+    type?: string;
+    page_id?: string;
+    database_id?: string;
+    data_source_id?: string;
+  };
+  title?: string;
+}
+
+export interface NotionSearchReport {
+  service: 'notion';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  timestamp: string;
+  results: NotionSearchResult[];
+  query?: string | null;
+  version?: string;
+  limit?: number;
+  returned?: number;
+  has_more?: boolean;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface AsanaWorkspaceSummary {
+  gid: string;
+  resource_type: string;
+  name?: string;
+  path?: string;
+  uri?: string;
+  is_organization?: boolean;
+}
+
+export interface AsanaProjectSummary {
+  gid: string;
+  resource_type: string;
+  name?: string;
+  permalink_url?: string;
+  archived?: boolean;
+  public?: boolean;
+}
+
+export interface AsanaReadOnlyReport {
+  service: 'asana';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  resource: 'workspaces' | 'projects';
+  timestamp: string;
+  workspaces?: AsanaWorkspaceSummary[];
+  projects?: AsanaProjectSummary[];
+  workspace?: string | null;
+  limit?: number;
+  returned?: number;
+  has_more?: boolean;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface LinearTeamSummary {
+  id: string;
+  name?: string;
+  key?: string;
+}
+
+export interface LinearProjectSummary {
+  id: string;
+  name?: string;
+}
+
+export interface LinearReadOnlyReport {
+  service: 'linear';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  resource: 'teams' | 'projects';
+  timestamp: string;
+  teams?: LinearTeamSummary[];
+  projects?: LinearProjectSummary[];
+  limit?: number;
+  returned?: number;
+  has_more?: boolean;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface DiscordGuildSummary {
+  id: string;
+  name?: string;
+  icon?: string;
+  owner?: boolean;
+  features?: string[];
+}
+
+export interface DiscordGuildsReport {
+  service: 'discord';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  resource: 'guilds';
+  timestamp: string;
+  guilds: DiscordGuildSummary[];
+  limit?: number;
+  returned?: number;
+  has_more?: boolean;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface WhatsAppPhoneNumberSummary {
+  id: string;
+  verified_name?: string;
+  display_phone_number_masked?: string;
+  quality_rating?: string;
+}
+
+export interface WhatsAppBusinessReadOnlyReport {
+  service: 'whatsapp-business';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  resource: 'phone-numbers';
+  timestamp: string;
+  phone_numbers: WhatsAppPhoneNumberSummary[];
+  waba_id?: string;
+  graph_api_version?: string;
+  limit?: number;
+  returned?: number;
+  has_more?: boolean;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface MicrosoftGraphProfile {
+  id: string;
+  displayName?: string;
+}
+
+export interface MicrosoftGraphReadOnlyReport {
+  service: 'microsoft-graph';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  resource: 'me';
+  timestamp: string;
+  profile: MicrosoftGraphProfile;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
+export interface ZoomUserProfile {
+  id: string;
+  display_name?: string;
+  status?: string;
+}
+
+export interface ZoomReadOnlyReport {
+  service: 'zoom';
+  status: 'healthy' | 'not_configured' | 'error' | 'offline';
+  resource: 'me';
+  timestamp: string;
+  profile: ZoomUserProfile;
+  missing?: string[];
+  error_class?: string;
+  offline?: boolean;
+}
+
 export interface Profile {
   id: number;
   name: string | null;
@@ -257,6 +486,144 @@ class SoloEmpireAPI {
     const params = new URLSearchParams({ limit: String(options.limit || 20) });
     if (options.offline) params.set('offline', 'true');
     return this.fetch(`/api/integrations/sentry/issues?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getPostHogInsights(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<PostHogInsightsReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/posthog/insights?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getSlackChannels(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<SlackChannelsReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/slack/channels?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async searchNotion(options: {
+    token: string;
+    query?: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<NotionSearchReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.query) params.set('query', options.query);
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/notion/search?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getAsanaWorkspaces(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<AsanaReadOnlyReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/asana/workspaces?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getAsanaProjects(options: {
+    token: string;
+    workspace: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<AsanaReadOnlyReport> {
+    const params = new URLSearchParams({
+      workspace: options.workspace,
+      limit: String(options.limit || 20),
+    });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/asana/projects?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getLinearTeams(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<LinearReadOnlyReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/linear/teams?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getLinearProjects(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<LinearReadOnlyReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/linear/projects?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getDiscordGuilds(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<DiscordGuildsReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/discord/guilds?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getWhatsAppBusinessPhoneNumbers(options: {
+    token: string;
+    limit?: number;
+    offline?: boolean;
+  }): Promise<WhatsAppBusinessReadOnlyReport> {
+    const params = new URLSearchParams({ limit: String(options.limit || 20) });
+    if (options.offline) params.set('offline', 'true');
+    return this.fetch(`/api/integrations/whatsapp-business/phone-numbers?${params.toString()}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getMicrosoftGraphProfile(options: {
+    token: string;
+    offline?: boolean;
+  }): Promise<MicrosoftGraphReadOnlyReport> {
+    const params = new URLSearchParams();
+    if (options.offline) params.set('offline', 'true');
+    const query = params.toString();
+    return this.fetch(`/api/integrations/microsoft-graph/me${query ? `?${query}` : ''}`, {
+      Authorization: `Bearer ${options.token}`,
+    });
+  }
+
+  async getZoomProfile(options: {
+    token: string;
+    offline?: boolean;
+  }): Promise<ZoomReadOnlyReport> {
+    const params = new URLSearchParams();
+    if (options.offline) params.set('offline', 'true');
+    const query = params.toString();
+    return this.fetch(`/api/integrations/zoom/me${query ? `?${query}` : ''}`, {
       Authorization: `Bearer ${options.token}`,
     });
   }
