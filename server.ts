@@ -1,22 +1,60 @@
 import { createServer } from 'http';
+import { execFile } from 'child_process';
 import { getDb, initDb, closeDb } from '../mcp-server/src/db.js';
-import { URL } from 'url';
+import { fileURLToPath, URL } from 'url';
+import { promisify } from 'util';
+import { join } from 'path';
+import { EXTERNAL_APP_REGISTRY, EXTERNAL_INTEGRATIONS, sanitizeIntegrationHealth } from './integrations.js';
+import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
+import { verifyStripeSignature } from './stripe.js';
 
 const PORT = process.env.PORT || 3001;
 const API_TOKEN = process.env.API_TOKEN || '';  // Bearer token for write routes
 const MAX_BODY_SIZE = parseInt(process.env.MAX_BODY_SIZE || '1048576'); // 1MB default
+const execFileAsync = promisify(execFile);
+const PROJECT_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const PYTHON_WRAPPER = join(PROJECT_ROOT, 'infra', 'scripts', 'setup', 'run-python3.sh');
+const INTEGRATION_HEALTH_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'integration_health.py');
+const EXTERNAL_DISCOVERY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'discover_external_apps.py');
+const SENTRY_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'sentry_readonly.py');
+const INTEGRATION_HEALTH_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.INTEGRATION_HEALTH_TIMEOUT_MS || 120000), 1000),
+  300000,
+);
+const EXTERNAL_DISCOVERY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.EXTERNAL_DISCOVERY_TIMEOUT_MS || 180000), 1000),
+  300000,
+);
+const SENTRY_READONLY_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.SENTRY_READONLY_TIMEOUT_MS || 30000), 1000),
+  120000,
+);
+
+class HttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+  }
+}
 
 // CORS headers — restrict origin in production
-const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:5173').split(',');
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:5173')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key',
+  'Content-Type': 'application/json; charset=utf-8',
 };
 
 function getCorsHeaders(req: any): Record<string, string> {
-  const origin = req.headers.origin || '';
-  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-  return { ...corsHeaders, 'Access-Control-Allow-Origin': allowOrigin, 'Vary': 'Origin' };
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  if (!origin || !ALLOWED_ORIGINS.includes(origin)) return { ...corsHeaders };
+  return { ...corsHeaders, 'Access-Control-Allow-Origin': origin, 'Vary': 'Origin' };
 }
 
 /**
@@ -51,7 +89,9 @@ function isValidUrl(str: string): boolean {
 }
 
 function sendJson(res: any, data: any, status = 200, req?: any) {
-  const headers = req ? getCorsHeaders(req) : { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+  const headers = req
+    ? getCorsHeaders(req)
+    : { ...corsHeaders, 'Access-Control-Allow-Origin': '*' };
   res.writeHead(status, headers);
   res.end(JSON.stringify(data));
 }
@@ -63,7 +103,7 @@ function parseBody(req: any): Promise<any> {
     req.on('data', chunk => {
       size += chunk.length;
       if (size > MAX_BODY_SIZE) {
-        reject(new Error(`Request body too large (max ${MAX_BODY_SIZE} bytes)`));
+        reject(new HttpError(413, `Request body too large (max ${MAX_BODY_SIZE} bytes)`));
         req.destroy();
         return;
       }
@@ -72,12 +112,119 @@ function parseBody(req: any): Promise<any> {
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {});
-      } catch (e) {
-        reject(e);
+      } catch {
+        reject(new HttpError(400, 'Request body must be valid JSON'));
       }
     });
     req.on('error', reject);
   });
+}
+
+function parseRawBody(req: any): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+
+    req.on('data', (chunk: Buffer | string) => {
+      if (settled) return;
+      const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += part.length;
+      if (size > MAX_BODY_SIZE) {
+        fail(new HttpError(413, `Request body too large (max ${MAX_BODY_SIZE} bytes)`));
+        req.destroy();
+        return;
+      }
+      chunks.push(part);
+    });
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on('error', fail);
+  });
+}
+
+async function runIntegrationHealth(offline: boolean) {
+  const args = [INTEGRATION_HEALTH_SCRIPT, '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: INTEGRATION_HEALTH_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+    return sanitizeIntegrationHealth(JSON.parse(result.stdout));
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[integration-health] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Integration health check timed out');
+    }
+    throw new HttpError(502, 'Integration health check unavailable');
+  }
+}
+
+async function runExternalDiscovery(source: 'apis-guru' | 'mcp-registry' | 'all', limit: number, offline: boolean) {
+  const args = [EXTERNAL_DISCOVERY_SCRIPT, '--source', source, '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: EXTERNAL_DISCOVERY_TIMEOUT_MS,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    // A partial discovery run exits non-zero by contract but still returns a
+    // safe JSON report. Preserve that report for callers instead of hiding it.
+    if (typeof error?.stdout === 'string' && error.stdout.trim()) {
+      try {
+        return JSON.parse(error.stdout);
+      } catch {
+        // Fall through to the bounded error response below.
+      }
+    }
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[external-discovery] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'External catalog discovery timed out');
+    }
+    throw new HttpError(502, 'External catalog discovery unavailable');
+  }
+}
+
+async function runSentryIssues(limit: number, offline: boolean) {
+  const args = [SENTRY_READONLY_SCRIPT, '--limit', String(limit), '--json'];
+  if (offline) args.push('--offline');
+
+  try {
+    const result = await execFileAsync(PYTHON_WRAPPER, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeout: SENTRY_READONLY_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(result.stdout);
+  } catch (error: any) {
+    const errorClass = error?.code === 'ETIMEDOUT' ? 'timeout' : (error?.name || 'Error');
+    console.error(`[sentry-readonly] ${errorClass}`);
+    if (error?.code === 'ETIMEDOUT') {
+      throw new HttpError(504, 'Sentry read-only API timed out');
+    }
+    throw new HttpError(502, 'Sentry read-only API unavailable');
+  }
 }
 
 // =====================================================
@@ -166,7 +313,12 @@ async function handleRequest(req: any, res: any) {
     // GET /api/content - ดึง content ที่ published แล้ว
     if (path === '/api/content' && method === 'GET') {
       const type = url.searchParams.get('type');
-      const limit = parseInt(url.searchParams.get('limit') || '20');
+      const rawLimit = url.searchParams.get('limit');
+      const limit = rawLimit === null ? 20 : Number(rawLimit);
+
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
 
       let query = 'SELECT id, title, slug, content_type, summary, status, published_at, platforms, canonical_url, views, shares FROM content WHERE status = ?';
       const args: any[] = ['published'];
@@ -187,6 +339,199 @@ async function handleRequest(req: any, res: any) {
 
       if (!item) return sendJson(res, { error: 'Not found' }, 404, req);
       return sendJson(res, { content: item }, 200, req);
+    }
+
+    // GET /api/integrations - catalog of direct external API boundaries.
+    if (path === '/api/integrations' && method === 'GET') {
+      return sendJson(res, {
+        source: 'infra/scripts/sync/integration_health.py',
+        total_apps: EXTERNAL_APP_REGISTRY.length,
+        status_counts: EXTERNAL_APP_REGISTRY.reduce((counts: Record<string, number>, app) => {
+          counts[app.status] = (counts[app.status] || 0) + 1;
+          return counts;
+        }, {}),
+        apps: EXTERNAL_APP_REGISTRY,
+        integrations: EXTERNAL_INTEGRATIONS,
+      }, 200, req);
+    }
+
+    // GET /api/integrations/health - bounded read-only provider checks.
+    // Health can disclose account connectivity, so it is authenticated.
+    if (path === '/api/integrations/health' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const health = await runIntegrationHealth(offline);
+      return sendJson(res, health, 200, req);
+    }
+
+    // GET /api/integrations/discovery - bounded public catalog discovery.
+    // This returns metadata only; it never installs or authenticates a service.
+    if (path === '/api/integrations/discovery' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedSource = url.searchParams.get('source') || 'all';
+      const source = requestedSource === 'apis-guru' || requestedSource === 'mcp-registry' || requestedSource === 'all'
+        ? requestedSource
+        : null;
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 1000 : Number(requestedLimit);
+      if (!source) return sendJson(res, { error: 'source must be apis-guru, mcp-registry, or all' }, 400, req);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 10000) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 10000' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const discovery = await runExternalDiscovery(source, limit, offline);
+      return sendJson(res, discovery, 200, req);
+    }
+
+    // GET /api/integrations/sentry/issues - bounded, read-only issue summary.
+    // This is authenticated because issue titles can contain private context.
+    if (path === '/api/integrations/sentry/issues' && method === 'GET') {
+      const auth = requireAuth(req);
+      if (!auth.authorized) {
+        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+      }
+      const requestedLimit = url.searchParams.get('limit');
+      const limit = requestedLimit === null ? 20 : Number(requestedLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
+      }
+      const offline = url.searchParams.get('offline') === 'true';
+      const issues = await runSentryIssues(limit, offline);
+      return sendJson(res, issues, 200, req);
+    }
+
+    // POST /api/webhook/line - LINE signs this public ingress instead of using
+    // the internal Bearer token. The raw body must be verified before parsing.
+    if (path === '/api/webhook/line' && method === 'POST') {
+      const rawBody = await parseRawBody(req);
+      const channelSecret = process.env.LINE_SOLO_EMPIRE_WEBHOOK_SECRET;
+      const signature = typeof req.headers['x-line-signature'] === 'string'
+        ? req.headers['x-line-signature']
+        : undefined;
+
+      if (!channelSecret) {
+        return sendJson(res, { error: 'LINE webhook is not configured' }, 503, req);
+      }
+      if (!verifyLineSignature(rawBody, signature, channelSecret)) {
+        return sendJson(res, { error: 'Invalid LINE webhook signature' }, 401, req);
+      }
+
+      let body: any;
+      try {
+        body = JSON.parse(rawBody.toString('utf8'));
+      } catch {
+        return sendJson(res, { error: 'Request body must be valid JSON' }, 400, req);
+      }
+
+      if (!body || !Array.isArray(body.events)) {
+        return sendJson(res, { error: 'LINE webhook body must include an events array' }, 400, req);
+      }
+
+      const events = body.events.filter((event: any): event is LineWebhookEvent => (
+        event && typeof event === 'object' && typeof event.type === 'string'
+      ));
+      if (events.length !== body.events.length) {
+        return sendJson(res, { error: 'Each LINE webhook event must include a type' }, 400, req);
+      }
+
+      let acceptedEvents = 0;
+      let duplicateEvents = 0;
+      const insertEvent = db.prepare(`
+        INSERT INTO webhook_log (source, event_type, external_id, payload, processed)
+        VALUES ('line', ?, ?, ?, 0)
+      `);
+      const findExisting = db.prepare(
+        "SELECT id FROM webhook_log WHERE source = 'line' AND external_id = ? LIMIT 1",
+      );
+
+      db.transaction(() => {
+        for (const event of events) {
+          const externalId = getLineEventExternalId(event);
+          if (externalId && findExisting.get(externalId)) {
+            duplicateEvents += 1;
+            continue;
+          }
+
+          insertEvent.run(
+            event.type,
+            externalId,
+            JSON.stringify({ destination: body.destination || null, event }),
+          );
+          acceptedEvents += 1;
+        }
+      })();
+
+      return sendJson(res, {
+        success: true,
+        source: 'line',
+        received_events: events.length,
+        accepted_events: acceptedEvents,
+        duplicate_events: duplicateEvents,
+        processing: 'queued',
+      }, 200, req);
+    }
+
+    // POST /api/webhook/stripe - signed Stripe ingress only. Payment events
+    // remain pending in webhook_log; this route never creates charges/refunds.
+    if (path === '/api/webhook/stripe' && method === 'POST') {
+      const rawBody = await parseRawBody(req);
+      const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+      const signature = typeof req.headers['stripe-signature'] === 'string'
+        ? req.headers['stripe-signature']
+        : undefined;
+
+      if (!endpointSecret) {
+        return sendJson(res, { error: 'Stripe webhook is not configured' }, 503, req);
+      }
+      const verification = verifyStripeSignature(rawBody, signature, endpointSecret);
+      if (!verification.valid) {
+        return sendJson(res, { error: 'Invalid Stripe webhook signature' }, 400, req);
+      }
+
+      let body: any;
+      try {
+        body = JSON.parse(rawBody.toString('utf8'));
+      } catch {
+        return sendJson(res, { error: 'Request body must be valid JSON' }, 400, req);
+      }
+
+      if (!body || typeof body.id !== 'string' || !body.id.trim() || typeof body.type !== 'string' || !body.type.trim()) {
+        return sendJson(res, { error: 'Stripe event must include id and type' }, 400, req);
+      }
+
+      const existing = db.prepare(
+        "SELECT id FROM webhook_log WHERE source = 'stripe' AND external_id = ? LIMIT 1",
+      ).get(body.id.trim());
+      if (existing) {
+        return sendJson(res, {
+          success: true,
+          source: 'stripe',
+          received: true,
+          accepted_events: 0,
+          duplicate_events: 1,
+          processing: 'queued',
+        }, 200, req);
+      }
+
+      db.prepare(`
+        INSERT INTO webhook_log (source, event_type, external_id, payload, processed)
+        VALUES ('stripe', ?, ?, ?, 0)
+      `).run(body.type.trim(), body.id.trim(), rawBody.toString('utf8'));
+
+      return sendJson(res, {
+        success: true,
+        source: 'stripe',
+        received: true,
+        accepted_events: 1,
+        duplicate_events: 0,
+        processing: 'queued',
+      }, 200, req);
     }
 
     // =====================================================
@@ -360,55 +705,96 @@ async function handleRequest(req: any, res: any) {
     if (path === '/api/webhook/analytics' && method === 'POST') {
       const body = await parseBody(req);
       const { asset_id, metric_date, views, subscribers, revenue, engagement_rate } = body;
+      const assetId = Number(asset_id);
 
-      if (!asset_id || !metric_date) {
+      if (!Number.isInteger(assetId) || assetId <= 0 || !metric_date) {
         return sendJson(res, { error: 'Missing required fields: asset_id, metric_date' }, 400, req);
       }
 
+      if (typeof metric_date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(metric_date)) {
+        return sendJson(res, { error: 'metric_date must use YYYY-MM-DD format' }, 400, req);
+      }
+
+      const asset = db.prepare('SELECT id FROM assets WHERE id = ?').get(assetId);
+      if (!asset) {
+        return sendJson(res, { error: 'Asset not found' }, 404, req);
+      }
+
       // Validate numeric ranges
-      if (views !== undefined && (typeof views !== 'number' || views < 0 || views > 1e9)) {
+      if (views !== undefined && (typeof views !== 'number' || !Number.isFinite(views) || views < 0 || views > 1e9)) {
         return sendJson(res, { error: 'views must be a number between 0 and 1,000,000,000' }, 400, req);
       }
-      if (subscribers !== undefined && (typeof subscribers !== 'number' || subscribers < 0 || subscribers > 1e9)) {
+      if (subscribers !== undefined && (typeof subscribers !== 'number' || !Number.isFinite(subscribers) || subscribers < 0 || subscribers > 1e9)) {
         return sendJson(res, { error: 'subscribers must be a number between 0 and 1,000,000,000' }, 400, req);
       }
-      if (revenue !== undefined && (typeof revenue !== 'number' || revenue < 0 || revenue > 1e9)) {
+      if (revenue !== undefined && (typeof revenue !== 'number' || !Number.isFinite(revenue) || revenue < 0 || revenue > 1e9)) {
         return sendJson(res, { error: 'revenue must be a number between 0 and 1,000,000,000' }, 400, req);
       }
-      if (engagement_rate !== undefined && (typeof engagement_rate !== 'number' || engagement_rate < 0 || engagement_rate > 100)) {
+      if (engagement_rate !== undefined && (typeof engagement_rate !== 'number' || !Number.isFinite(engagement_rate) || engagement_rate < 0 || engagement_rate > 100)) {
         return sendJson(res, { error: 'engagement_rate must be a number between 0 and 100' }, 400, req);
       }
 
-      db.prepare(`
-        INSERT OR REPLACE INTO asset_metrics (asset_id, metric_date, views, subscribers, revenue, engagement_rate)
+      const previous = db.prepare(`
+        SELECT views, subscribers, revenue, engagement_rate
+        FROM asset_metrics WHERE asset_id = ? AND metric_date = ?
+      `).get(assetId, metric_date) as any;
+      const nextViews = views ?? 0;
+      const nextSubscribers = subscribers ?? 0;
+      const nextRevenue = revenue ?? 0;
+      const nextEngagementRate = engagement_rate ?? previous?.engagement_rate ?? null;
+
+      const updateMetrics = db.prepare(`
+        INSERT INTO asset_metrics (asset_id, metric_date, views, subscribers, revenue, engagement_rate)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(asset_id, metric_date, views || 0, subscribers || 0, revenue || 0, engagement_rate || null);
+        ON CONFLICT(asset_id, metric_date) DO UPDATE SET
+          views = excluded.views,
+          subscribers = excluded.subscribers,
+          revenue = excluded.revenue,
+          engagement_rate = excluded.engagement_rate
+      `);
+      const updateTotals = db.prepare(`
+        UPDATE assets SET
+          views = COALESCE(views, 0) + ?,
+          subscribers = COALESCE(subscribers, 0) + ?,
+          revenue = COALESCE(revenue, 0) + ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `);
 
-      // Update asset totals
-      if (views || subscribers || revenue) {
-        db.prepare(`
-          UPDATE assets SET
-            views = COALESCE(views, 0) + ?,
-            subscribers = COALESCE(subscribers, 0) + ?,
-            revenue = COALESCE(revenue, 0) + ?,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `).run(views || 0, subscribers || 0, revenue || 0, asset_id);
-      }
+      db.transaction(() => {
+        updateMetrics.run(assetId, metric_date, nextViews, nextSubscribers, nextRevenue, nextEngagementRate);
+        updateTotals.run(
+          nextViews - (previous?.views ?? 0),
+          nextSubscribers - (previous?.subscribers ?? 0),
+          nextRevenue - (previous?.revenue ?? 0),
+          assetId,
+        );
+      })();
 
-      return sendJson(res, { success: true }, 200, req);
+      return sendJson(res, { success: true, updated: Boolean(previous) }, 200, req);
     }
 
     // POST /api/webhook/revenue - รับ revenue data
     if (path === '/api/webhook/revenue' && method === 'POST') {
       const body = await parseBody(req);
+      const idempotencyKey = typeof req.headers['idempotency-key'] === 'string'
+        ? req.headers['idempotency-key'].trim()
+        : '';
 
       if (!body.source_type || !body.source_name || !body.amount || !body.revenue_date) {
         return sendJson(res, { error: 'Missing required fields: source_type, source_name, amount, revenue_date' }, 400, req);
       }
 
+      if (!idempotencyKey || idempotencyKey.length > 255) {
+        return sendJson(res, { error: 'Idempotency-Key header is required and must be at most 255 characters' }, 400, req);
+      }
+
+      if (typeof body.revenue_date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(body.revenue_date)) {
+        return sendJson(res, { error: 'revenue_date must use YYYY-MM-DD format' }, 400, req);
+      }
+
       // Validate amount is a positive number
-      if (typeof body.amount !== 'number' || body.amount <= 0 || body.amount > 1e9) {
+      if (typeof body.amount !== 'number' || !Number.isFinite(body.amount) || body.amount <= 0 || body.amount > 1e9) {
         return sendJson(res, { error: 'amount must be a positive number up to 1,000,000,000' }, 400, req);
       }
 
@@ -418,10 +804,17 @@ async function handleRequest(req: any, res: any) {
         return sendJson(res, { error: `source_type must be one of: ${VALID_SOURCE_TYPES.join(', ')}` }, 400, req);
       }
 
+      const existing = db.prepare(`
+        SELECT id FROM revenue WHERE idempotency_key = ?
+      `).get(idempotencyKey) as any;
+      if (existing) {
+        return sendJson(res, { success: true, id: existing.id, duplicate: true }, 200, req);
+      }
+
       const result = db.prepare(`
-        INSERT INTO revenue (source_type, source_name, amount, currency, revenue_date, description)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(body.source_type, body.source_name, body.amount, body.currency || 'THB', body.revenue_date, body.description || null);
+        INSERT INTO revenue (source_type, source_name, amount, currency, revenue_date, description, idempotency_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(body.source_type, body.source_name, body.amount, body.currency || 'THB', body.revenue_date, body.description || null, idempotencyKey);
 
       return sendJson(res, { success: true, id: result.lastInsertRowid }, 200, req);
     }
@@ -443,7 +836,9 @@ async function handleRequest(req: any, res: any) {
 
   } catch (error: any) {
     console.error('Error:', error);
-    return sendJson(res, { error: error.message }, 500, req);
+    const status = error instanceof HttpError ? error.status : 500;
+    const message = status >= 500 ? 'Internal server error' : error.message;
+    return sendJson(res, { error: message }, status, req);
   }
 }
 
@@ -460,7 +855,7 @@ async function startServer() {
   }
 
   await initDb();
-  
+
   const server = createServer(handleRequest);
   server.listen(PORT, () => {
     console.log(`Solo Empire API running on http://localhost:${PORT}`);
