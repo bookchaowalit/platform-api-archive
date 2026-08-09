@@ -13,21 +13,21 @@ const PORT = process.env.PORT || 3001;
 const API_TOKEN = process.env.API_TOKEN || '';  // Bearer token for write routes
 const MAX_BODY_SIZE = parseInt(process.env.MAX_BODY_SIZE || '1048576'); // 1MB default
 const execFileAsync = promisify(execFile);
-const PROJECT_ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const PYTHON_WRAPPER = join(PROJECT_ROOT, 'infra', 'scripts', 'setup', 'run-python3.sh');
-const INTEGRATION_HEALTH_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'integration_health.py');
-const EXTERNAL_DISCOVERY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'discover_external_apps.py');
-const SENTRY_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'sentry_readonly.py');
-const POSTHOG_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'posthog_readonly.py');
-const SLACK_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'slack_readonly.py');
-const NOTION_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'notion_readonly.py');
-const ASANA_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'asana_readonly.py');
-const LINEAR_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'linear_readonly.py');
-const DISCORD_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'discord_readonly.py');
-const WHATSAPP_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'whatsapp_business_readonly.py');
-const MICROSOFT_GRAPH_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'microsoft_graph_readonly.py');
-const ZOOM_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'zoom_readonly.py');
-const MONDAY_READONLY_SCRIPT = join(PROJECT_ROOT, 'infra', 'scripts', 'sync', 'monday_readonly.py');
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const PYTHON_WRAPPER = join(REPO_ROOT, 'infra', 'scripts', 'setup', 'run-python3.sh');
+const INTEGRATION_HEALTH_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'integration_health.py');
+const EXTERNAL_DISCOVERY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'discover_external_apps.py');
+const SENTRY_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'sentry_readonly.py');
+const POSTHOG_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'posthog_readonly.py');
+const SLACK_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'slack_readonly.py');
+const NOTION_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'notion_readonly.py');
+const ASANA_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'asana_readonly.py');
+const LINEAR_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'linear_readonly.py');
+const DISCORD_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'discord_readonly.py');
+const WHATSAPP_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'whatsapp_business_readonly.py');
+const MICROSOFT_GRAPH_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'microsoft_graph_readonly.py');
+const ZOOM_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'zoom_readonly.py');
+const MONDAY_READONLY_SCRIPT = join(REPO_ROOT, 'infra', 'scripts', 'sync', 'monday_readonly.py');
 const INTEGRATION_HEALTH_TIMEOUT_MS = Math.min(
   Math.max(Number(process.env.INTEGRATION_HEALTH_TIMEOUT_MS || 120000), 1000),
   300000,
@@ -248,7 +248,7 @@ async function runIntegrationHealth(offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: INTEGRATION_HEALTH_TIMEOUT_MS,
       maxBuffer: 1024 * 1024,
@@ -270,7 +270,7 @@ async function runExternalDiscovery(source: 'apis-guru' | 'mcp-registry' | 'all'
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: EXTERNAL_DISCOVERY_TIMEOUT_MS,
       maxBuffer: 32 * 1024 * 1024,
@@ -301,7 +301,7 @@ async function runSentryIssues(limit: number, offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: SENTRY_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -323,7 +323,7 @@ async function runPostHogInsights(limit: number, offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: POSTHOG_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -345,7 +345,7 @@ async function runSlackChannels(limit: number, offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: SLACK_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -368,7 +368,7 @@ async function runNotionSearch(limit: number, query: string, offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: NOTION_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -391,7 +391,7 @@ async function runAsana(resource: 'workspaces' | 'projects', limit: number, work
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: ASANA_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -413,7 +413,7 @@ async function runLinear(resource: 'teams' | 'projects', limit: number, offline:
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: LINEAR_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -435,7 +435,7 @@ async function runDiscordGuilds(limit: number, offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: DISCORD_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -457,7 +457,7 @@ async function runWhatsAppPhoneNumbers(limit: number, offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: WHATSAPP_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -479,7 +479,7 @@ async function runMicrosoftGraphProfile(offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: MICROSOFT_GRAPH_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -501,7 +501,7 @@ async function runZoomProfile(offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: ZOOM_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
@@ -523,7 +523,7 @@ async function runMondayBoards(limit: number, offline: boolean) {
 
   try {
     const result = await execFileAsync(PYTHON_WRAPPER, args, {
-      cwd: PROJECT_ROOT,
+      cwd: REPO_ROOT,
       env: process.env,
       timeout: MONDAY_READONLY_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
