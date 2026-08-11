@@ -2,6 +2,14 @@ import { randomUUID } from 'crypto';
 
 export const AI_GATEWAY_CONTRACT = 'solo-empire.ai-gateway.v1';
 export const AI_TELEMETRY_CONTRACT = 'solo-empire.ai-telemetry.v1';
+export const AI_RESPONSE_LANGUAGE = 'th' as const;
+export const AI_RESPONSE_LANGUAGE_POLICY_VERSION = 'solo-empire.ai-response-language.th-v1';
+export const AI_RESPONSE_LANGUAGE_SYSTEM_MESSAGE = [
+  'ภาษาหลักของคำตอบ: ภาษาไทย',
+  'ตอบผู้ใช้เป็นภาษาไทยสำหรับคำอธิบาย สรุป สถานะ คำถาม แผนงาน คำเตือน และ handoff',
+  'คง code, commands, file paths, identifiers, logs, protocol fields และข้อความที่อ้างคำพูดไว้ตามต้นฉบับเมื่อการแปลทำให้ความถูกต้องลดลง',
+  'ใช้ภาษาอื่นเฉพาะเมื่อผู้ใช้ขอภาษาอื่นอย่างชัดเจนสำหรับคำตอบหรือ artifact นั้น',
+].join('\n');
 
 export type AiProfile = 'fast' | 'balanced' | 'quality';
 export type AiPrivacyClass = 'public' | 'internal' | 'private' | 'restricted';
@@ -66,6 +74,7 @@ export interface AiGenerateResponse {
 
 export interface AiGatewayStatus {
   contract: typeof AI_GATEWAY_CONTRACT;
+  response_language: typeof AI_RESPONSE_LANGUAGE;
   configured: boolean;
   provider: string | null;
   adapter: 'openai-compatible' | 'none';
@@ -115,6 +124,16 @@ const PROFILE_DEFAULT_OUTPUT: Record<AiProfile, number> = {
 
 const PRIVACY_CLASSES = new Set<AiPrivacyClass>(['public', 'internal', 'private', 'restricted']);
 const PROFILES = new Set<AiProfile>(['fast', 'balanced', 'quality']);
+
+function withDefaultResponseLanguage(messages: AiMessage[]): AiMessage[] {
+  const systemIndex = messages.findIndex((message) => message.role === 'system');
+  if (systemIndex >= 0) {
+    return messages.map((message, index) => index === systemIndex
+      ? { ...message, content: `${message.content}\n\n${AI_RESPONSE_LANGUAGE_SYSTEM_MESSAGE}` }
+      : message);
+  }
+  return [{ role: 'system', content: AI_RESPONSE_LANGUAGE_SYSTEM_MESSAGE }, ...messages];
+}
 
 function boundedInt(value: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = value === undefined || value.trim() === '' ? fallback : Number(value);
@@ -193,6 +212,7 @@ function readConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
 export function getAiGatewayStatus(env: NodeJS.ProcessEnv = process.env): AiGatewayStatus {
   const common = {
     contract: AI_GATEWAY_CONTRACT as typeof AI_GATEWAY_CONTRACT,
+    response_language: AI_RESPONSE_LANGUAGE,
     adapter: 'none' as const,
     base_url_configured: Boolean(env.AI_GATEWAY_BASE_URL),
     api_key_configured: Boolean(env.AI_GATEWAY_API_KEY),
@@ -263,7 +283,8 @@ function validateRequest(input: unknown, config: GatewayConfig): Required<Pick<A
     return { role, content } as AiMessage;
   });
   if (!messages.some((message) => message.role === 'user')) throw new AiGatewayError(400, 'messages must contain a user message');
-  const contextChars = messages.reduce((sum, message) => sum + message.content.length, 0);
+  const messagesWithLanguagePolicy = withDefaultResponseLanguage(messages);
+  const contextChars = messagesWithLanguagePolicy.reduce((sum, message) => sum + message.content.length, 0);
   if (contextChars > config.maxContextChars) throw new AiGatewayError(400, 'message context exceeds the gateway limit');
 
   const tokenBudget = value.token_budget === undefined ? config.defaultTokenBudget : Number(value.token_budget);
@@ -277,10 +298,10 @@ function validateRequest(input: unknown, config: GatewayConfig): Required<Pick<A
   }
   const temperature = value.temperature === undefined ? 0.2 : Number(value.temperature);
   if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) throw new AiGatewayError(400, 'temperature must be between 0 and 2');
-  const estimatedInputTokens = Math.ceil(contextChars / 4) + messages.length * 4;
+  const estimatedInputTokens = Math.ceil(contextChars / 4) + messagesWithLanguagePolicy.length * 4;
   if (estimatedInputTokens + maxOutputTokens > tokenBudget) throw new AiGatewayError(400, 'estimated input and output exceed token_budget');
 
-  return { route, prompt_version: promptVersion, messages, profile, privacyClass, tokenBudget, maxOutputTokens, temperature };
+  return { route, prompt_version: promptVersion, messages: messagesWithLanguagePolicy, profile, privacyClass, tokenBudget, maxOutputTokens, temperature };
 }
 
 function endpoint(baseUrl: URL): URL {
@@ -382,7 +403,14 @@ export async function generateAi(input: unknown, env: NodeJS.ProcessEnv = proces
     estimated_cost_usd: estimatedCost,
     cache_hit: false,
     status,
-    metadata: { contract: AI_GATEWAY_CONTRACT, profile: request.profile, privacy_class: request.privacyClass, usage_source: usage.source },
+    metadata: {
+      contract: AI_GATEWAY_CONTRACT,
+      profile: request.profile,
+      privacy_class: request.privacyClass,
+      usage_source: usage.source,
+      response_language: AI_RESPONSE_LANGUAGE,
+      response_language_policy: AI_RESPONSE_LANGUAGE_POLICY_VERSION,
+    },
   };
   return {
     response: {
