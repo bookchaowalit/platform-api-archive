@@ -8,6 +8,9 @@ import { EXTERNAL_APP_REGISTRY, EXTERNAL_INTEGRATIONS, sanitizeIntegrationHealth
 import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
 import { verifyStripeSignature } from './stripe.js';
 import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
+import { startTelemetry, withRequestSpan } from './telemetry.js';
+
+startTelemetry();
 
 const PORT = process.env.PORT || 3001;
 const API_TOKEN = process.env.API_TOKEN || '';  // Bearer token for write routes
@@ -545,6 +548,14 @@ async function runMondayBoards(limit: number, offline: boolean) {
 
 async function handleRequest(req: any, res: any) {
   const url = new URL(req.url || '/', `http://localhost:${PORT}`);
+  return withRequestSpan(
+    `${req.method || 'GET'} ${url.pathname}`,
+    { 'http.method': req.method || 'GET', 'http.route': url.pathname },
+    () => handleRequestInner(req, res, url),
+  );
+}
+
+async function handleRequestInner(req: any, res: any, url: URL) {
   const path = url.pathname;
   const method = req.method || 'GET';
 
