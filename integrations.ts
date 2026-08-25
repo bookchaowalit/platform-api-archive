@@ -1,5 +1,6 @@
 export type IntegrationHealthStatus =
   | 'healthy'
+  | 'configured'
   | 'not_configured'
   | 'error'
   | 'offline'
@@ -23,6 +24,10 @@ export const EXTERNAL_INTEGRATIONS: ExternalIntegrationDescriptor[] = [
   { id: 'github', name: 'GitHub', icon: '🐙', state: 'active', healthCheck: 'live', boundary: 'github' },
   { id: 'cloudflare', name: 'Cloudflare', icon: '☁️', state: 'active', healthCheck: 'live', boundary: 'cloudflare' },
   { id: 'vercel', name: 'Vercel', icon: '▲', state: 'active', healthCheck: 'live', boundary: 'vercel' },
+  { id: 'render', name: 'Render', icon: '◈', state: 'active', healthCheck: 'live', boundary: 'render' },
+  { id: 'railway', name: 'Railway', icon: '🚂', state: 'active', healthCheck: 'live', boundary: 'railway' },
+  { id: 'fly-io', name: 'Fly.io', icon: '✈', state: 'active', healthCheck: 'live', boundary: 'fly-io' },
+  { id: 'heroku', name: 'Heroku', icon: '⬡', state: 'active', healthCheck: 'live', boundary: 'heroku' },
   { id: 'telegram', name: 'Telegram', icon: '✈️', state: 'active', healthCheck: 'live', boundary: 'telegram' },
   { id: 'line', name: 'LINE Official Account', icon: '💬', state: 'active', healthCheck: 'live', boundary: 'line-messaging-api' },
   { id: 'stripe', name: 'Stripe', icon: '💳', state: 'active', healthCheck: 'live', boundary: 'stripe-payments-api' },
@@ -45,7 +50,7 @@ export const EXTERNAL_INTEGRATIONS: ExternalIntegrationDescriptor[] = [
 
 const ID_BY_NAME = new Map(EXTERNAL_INTEGRATIONS.map((item) => [item.name, item.id]));
 const ALLOWED_STATUSES = new Set<IntegrationHealthStatus>([
-  'healthy', 'not_configured', 'error', 'offline', 'degraded', 'unknown',
+  'healthy', 'configured', 'not_configured', 'error', 'offline', 'degraded', 'unknown',
 ]);
 
 export interface SanitizedIntegrationHealth {
@@ -62,6 +67,7 @@ export function sanitizeIntegrationHealth(payload: any): {
   timestamp: string;
   total_integrations: number;
   healthy: number;
+  configured: number;
   not_configured: number;
   errors: number;
   integrations: SanitizedIntegrationHealth[];
@@ -98,6 +104,7 @@ export function sanitizeIntegrationHealth(payload: any): {
     timestamp: typeof payload.timestamp === 'string' ? payload.timestamp : new Date().toISOString(),
     total_integrations: integrations.length,
     healthy: integrations.filter((item) => item.status === 'healthy').length,
+    configured: integrations.filter((item) => item.status === 'configured').length,
     not_configured: integrations.filter((item) => item.status === 'not_configured').length,
     errors: integrations.filter((item) => item.status === 'error').length,
     integrations,

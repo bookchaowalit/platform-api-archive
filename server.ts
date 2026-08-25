@@ -9,6 +9,14 @@ import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } fr
 import { verifyStripeSignature } from './stripe.js';
 import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
 import { startTelemetry, withRequestSpan } from './telemetry.js';
+import { financeApiResponse } from './finance.js';
+import { newFinanceApiRequestId, recordFinanceApiAudit } from './audit.js';
+import { authConfigurationError, authConfigurationPresent, requireAuth, type AuthResult } from './auth.js';
+import {
+  consumeFinanceRateLimit,
+  financeRateLimitConfigurationError,
+  financeRateLimitHeaders,
+} from './rate_limit.js';
 
 startTelemetry();
 
@@ -112,25 +120,6 @@ function getCorsHeaders(req: any): Record<string, string> {
 }
 
 /**
- * Validate Bearer token for write routes.
- * If API_TOKEN is set in env, require it. If not set, allow all (dev mode).
- * Dev mode requires ALLOW_UNAUTH_DEV=true to be explicitly set.
- */
-function requireAuth(req: any): { authorized: boolean; error?: string } {
-  if (!API_TOKEN) {
-    if (process.env.ALLOW_UNAUTH_DEV !== 'true') {
-      return { authorized: false, error: 'Unauthenticated writes disabled. Set ALLOW_UNAUTH_DEV=true for dev mode.' };
-    }
-    return { authorized: true };  // dev mode: no token required
-  }
-  const authHeader = req.headers.authorization || '';
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!match) return { authorized: false, error: 'Missing Authorization header' };
-  if (match[1] !== API_TOKEN) return { authorized: false, error: 'Invalid token' };
-  return { authorized: true };
-}
-
-/**
  * Validate URL format.
  */
 function isValidUrl(str: string): boolean {
@@ -142,12 +131,31 @@ function isValidUrl(str: string): boolean {
   }
 }
 
-function sendJson(res: any, data: any, status = 200, req?: any) {
+function sendJson(
+  res: any,
+  data: any,
+  status = 200,
+  req?: any,
+  requestId?: string,
+  extraHeaders?: Record<string, string>,
+) {
   const headers = req
     ? getCorsHeaders(req)
     : { ...corsHeaders, 'Access-Control-Allow-Origin': '*' };
+  if (requestId) headers['X-Request-ID'] = requestId;
+  if (extraHeaders) Object.assign(headers, extraHeaders);
   res.writeHead(status, headers);
   res.end(JSON.stringify(data));
+}
+
+function sendAuthFailure(res: any, req: any, auth: AuthResult) {
+  const status = auth.status || 401;
+  return sendJson(
+    res,
+    { error: status === 403 ? 'Forbidden' : 'Unauthorized', message: auth.error },
+    status,
+    req,
+  );
 }
 
 function recordAiTelemetry(db: any, event: AiTelemetryEvent): void {
@@ -572,17 +580,17 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // Central AI Gateway: all hosted generation is authenticated, bounded,
     // provider-neutral, and opt-in. Prompt/response bodies never enter telemetry.
     if (path === '/api/ai/status' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       return sendJson(res, getAiGatewayStatus(), 200, req);
     }
 
     if (path === '/api/ai/generate' && method === 'POST') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'ai:generate');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const body = await parseBody(req);
       try {
@@ -596,6 +604,99 @@ async function handleRequestInner(req: any, res: any, url: URL) {
         if (error instanceof AiGatewayError) {
           throw new HttpError(error.status, error.message);
         }
+        throw error;
+      }
+    }
+
+    // BookFinance API v1: authenticated read-only facade over the finance
+    // control-plane tables. Frontends consume this boundary; scrapers and
+    // data products must not write to it or access SQLite directly.
+    if (path === '/api/finance/v1' || path.startsWith('/api/finance/v1/')) {
+      const requestId = newFinanceApiRequestId();
+      const auth = requireAuth(req, 'finance:read');
+      const rateLimit = consumeFinanceRateLimit(auth.subject || 'anonymous');
+      const rateLimitHeaders = financeRateLimitHeaders(rateLimit);
+      if (!rateLimit.allowed) {
+        recordFinanceApiAudit(db, requestId, {
+          method,
+          route: path,
+          status: 429,
+          authorized: auth.authorized,
+          subject: auth.subject,
+          scopes: auth.scopes,
+          requiredScope: 'finance:read',
+          queryKeys: [...url.searchParams.keys()],
+        });
+        return sendJson(
+          res,
+          {
+            error: 'Too Many Requests',
+            schema_version: 'finance.v1',
+            retry_after_seconds: rateLimit.retryAfterSeconds,
+          },
+          429,
+          req,
+          requestId,
+          rateLimitHeaders,
+        );
+      }
+      if (!auth.authorized) {
+        recordFinanceApiAudit(db, requestId, {
+          method,
+          route: path,
+          status: auth.status || 401,
+          authorized: false,
+          subject: auth.subject,
+          scopes: auth.scopes,
+          requiredScope: 'finance:read',
+          queryKeys: [...url.searchParams.keys()],
+        });
+        return sendJson(
+          res,
+          { error: auth.status === 403 ? 'Forbidden' : 'Unauthorized', message: auth.error },
+          auth.status || 401,
+          req,
+          requestId,
+          rateLimitHeaders,
+        );
+      }
+      try {
+        const result = financeApiResponse(db, url, method);
+        if (!result) {
+          recordFinanceApiAudit(db, requestId, {
+            method,
+            route: path,
+            status: 404,
+            authorized: true,
+            subject: auth.subject,
+            scopes: auth.scopes,
+            requiredScope: 'finance:read',
+            queryKeys: [...url.searchParams.keys()],
+          });
+          return sendJson(res, { error: 'BookFinance API route not found' }, 404, req, requestId, rateLimitHeaders);
+        }
+        recordFinanceApiAudit(db, requestId, {
+          method,
+          route: path,
+          status: result.status,
+          authorized: true,
+          subject: auth.subject,
+          scopes: auth.scopes,
+          requiredScope: 'finance:read',
+          queryKeys: [...url.searchParams.keys()],
+        });
+        return sendJson(res, result.body, result.status, req, requestId, rateLimitHeaders);
+      } catch (error) {
+        recordFinanceApiAudit(db, requestId, {
+          method,
+          route: path,
+          status: 500,
+          authorized: true,
+          subject: auth.subject,
+          scopes: auth.scopes,
+          requiredScope: 'finance:read',
+          queryKeys: [...url.searchParams.keys()],
+        });
         throw error;
       }
     }
@@ -712,9 +813,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/health - bounded read-only provider checks.
     // Health can disclose account connectivity, so it is authenticated.
     if (path === '/api/integrations/health' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const offline = url.searchParams.get('offline') === 'true';
       const health = await runIntegrationHealth(offline);
@@ -724,9 +825,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/discovery - bounded public catalog discovery.
     // This returns metadata only; it never installs or authenticates a service.
     if (path === '/api/integrations/discovery' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedSource = url.searchParams.get('source') || 'all';
       const source = requestedSource === 'apis-guru' || requestedSource === 'mcp-registry' || requestedSource === 'all'
@@ -746,9 +847,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/sentry/issues - bounded, read-only issue summary.
     // This is authenticated because issue titles can contain private context.
     if (path === '/api/integrations/sentry/issues' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -763,9 +864,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/posthog/insights - bounded, read-only metadata.
     // This is authenticated because insight names and descriptions can be private.
     if (path === '/api/integrations/posthog/insights' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -780,9 +881,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/slack/channels - bounded public-channel metadata.
     // This is authenticated and never reads messages or performs mutations.
     if (path === '/api/integrations/slack/channels' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -797,9 +898,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/notion/search - bounded metadata-only inventory.
     // This is authenticated and never reads block content or performs mutations.
     if (path === '/api/integrations/notion/search' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -817,9 +918,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
 
     // GET /api/integrations/asana/workspaces - bounded workspace metadata.
     if (path === '/api/integrations/asana/workspaces' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -834,9 +935,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/asana/projects - bounded project metadata.
     // A workspace GID is required to avoid unbounded cross-domain queries.
     if (path === '/api/integrations/asana/projects' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -854,9 +955,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
 
     // GET /api/integrations/linear/teams - bounded team metadata.
     if (path === '/api/integrations/linear/teams' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -870,9 +971,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
 
     // GET /api/integrations/linear/projects - bounded project metadata.
     if (path === '/api/integrations/linear/projects' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -887,9 +988,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/discord/guilds - bounded partial guild metadata.
     // This is authenticated and never reads messages or performs mutations.
     if (path === '/api/integrations/discord/guilds' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -904,9 +1005,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/whatsapp-business/phone-numbers - bounded WABA metadata.
     // This is authenticated and never reads messages or performs mutations.
     if (path === '/api/integrations/whatsapp-business/phone-numbers' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -921,9 +1022,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/microsoft-graph/me - bounded signed-in-user metadata.
     // This is authenticated and never reads mail, files, calendar, Teams, or mutates Graph.
     if (path === '/api/integrations/microsoft-graph/me' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const offline = url.searchParams.get('offline') === 'true';
       const profile = await runMicrosoftGraphProfile(offline);
@@ -933,9 +1034,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/zoom/me - bounded authenticated-user metadata.
     // This is authenticated and never reads meetings or performs mutations.
     if (path === '/api/integrations/zoom/me' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const offline = url.searchParams.get('offline') === 'true';
       const profile = await runZoomProfile(offline);
@@ -945,9 +1046,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // GET /api/integrations/monday/boards - bounded board metadata.
     // This is authenticated and never reads items or performs mutations.
     if (path === '/api/integrations/monday/boards' && method === 'GET') {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:read');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
       const requestedLimit = url.searchParams.get('limit');
       const limit = requestedLimit === null ? 20 : Number(requestedLimit);
@@ -1094,9 +1195,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
 
     // Auth guard for all /api/sync/* and /api/webhook/* routes
     if (path.startsWith('/api/sync/') || path.startsWith('/api/webhook/')) {
-      const auth = requireAuth(req);
+      const auth = requireAuth(req, 'api:write');
       if (!auth.authorized) {
-        return sendJson(res, { error: 'Unauthorized', message: auth.error }, 401, req);
+        return sendAuthFailure(res, req, auth);
       }
     }
 
@@ -1400,10 +1501,18 @@ async function handleRequestInner(req: any, res: any, url: URL) {
 // =====================================================
 
 async function startServer() {
-  // Production safety: require API_TOKEN when NODE_ENV=production
-  if (process.env.NODE_ENV === 'production' && !API_TOKEN) {
-    console.error('ERROR: API_TOKEN environment variable is required in production mode');
-    console.error('Set API_TOKEN or run in development mode (NODE_ENV=development)');
+  // Production safety: require a valid legacy or scoped auth configuration.
+  if (process.env.NODE_ENV === 'production' && authConfigurationError()) {
+    console.error('ERROR: API_TOKENS_JSON is invalid in production mode');
+    process.exit(1);
+  }
+  if (process.env.NODE_ENV === 'production' && !authConfigurationPresent()) {
+    console.error('ERROR: API_TOKEN or API_TOKENS_JSON is required in production mode');
+    console.error('Set a legacy API_TOKEN or provision scoped token hashes before starting production');
+    process.exit(1);
+  }
+  if (process.env.NODE_ENV === 'production' && financeRateLimitConfigurationError()) {
+    console.error('ERROR: Finance API rate-limit configuration is invalid in production mode');
     process.exit(1);
   }
 
@@ -1415,7 +1524,7 @@ async function startServer() {
     console.log(`Health check: http://localhost:${PORT}/health`);
     console.log(`Profile: http://localhost:${PORT}/api/profile`);
     console.log(`Skills: http://localhost:${PORT}/api/skills`);
-    if (!API_TOKEN) {
+    if (!API_TOKEN && !authConfigurationPresent()) {
       console.log('');
       console.log('╔══════════════════════════════════════════════════════════════╗');
       console.log('║  ⚠️  SECURITY WARNING: Write routes are UNAUTHENTICATED     ║');
@@ -1427,8 +1536,10 @@ async function startServer() {
       console.log('║  For production, set API_TOKEN in your .env file.            ║');
       console.log('╚══════════════════════════════════════════════════════════════╝');
       console.log('');
+    } else if (API_TOKEN) {
+      console.log(`Auth: legacy Bearer token enabled`);
     } else {
-      console.log(`Auth: Bearer token enabled`);
+      console.log(`Auth: scoped Bearer token registry enabled`);
     }
   });
 }
