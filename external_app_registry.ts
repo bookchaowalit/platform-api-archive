@@ -22,6 +22,7 @@ export const EXTERNAL_APP_REGISTRY: ExternalAppRecord[] = [
   { id: 'google-calendar', name: 'Google Calendar', category: 'productivity', status: 'live', apiDocs: 'https://developers.google.com/calendar/api' },
   { id: 'gmail', name: 'Gmail', category: 'communication', status: 'live', apiDocs: 'https://developers.google.com/gmail/api' },
   { id: 'google-drive', name: 'Google Drive', category: 'storage', status: 'live', apiDocs: 'https://developers.google.com/drive/api' },
+  { id: 'google-sheets', name: 'Google Sheets', category: 'productivity', status: 'planned', apiDocs: 'https://developers.google.com/sheets/api', note: 'Learning tracker projection; provider write requires explicit matrix sync' },
   { id: 'github', name: 'GitHub', category: 'developer', status: 'live', apiDocs: 'https://docs.github.com/en/rest' },
   { id: 'cloudflare', name: 'Cloudflare', category: 'infrastructure', status: 'live', apiDocs: 'https://developers.cloudflare.com/api/' },
   { id: 'vercel', name: 'Vercel', category: 'infrastructure', status: 'live', apiDocs: 'https://vercel.com/docs/rest-api' },
@@ -109,6 +110,7 @@ export const EXTERNAL_APP_REGISTRY: ExternalAppRecord[] = [
   { id: 'alpha-vantage', name: 'Alpha Vantage', category: 'finance-data', status: 'planned', apiDocs: 'https://www.alphavantage.co/documentation/' },
   { id: 'openalex', name: 'OpenAlex', category: 'research', status: 'planned', apiDocs: 'https://docs.openalex.org/' },
   { id: 'crossref', name: 'Crossref', category: 'research', status: 'planned', apiDocs: 'https://api.crossref.org/' },
+  { id: 'roadmap-sh', name: 'roadmap.sh', category: 'research', status: 'planned', apiDocs: 'https://roadmap.sh/', note: 'Learning map reference; no automatic progress sync' },
 
   // Maps, messaging, email, and social (17)
   { id: 'mapbox', name: 'Mapbox', category: 'maps', status: 'planned', apiDocs: 'https://docs.mapbox.com/api/' },
