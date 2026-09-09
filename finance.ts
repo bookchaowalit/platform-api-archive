@@ -32,9 +32,9 @@ const RECONCILIATION_SOURCE_TYPES = new Set(['bank_statement', 'wallet_export', 
 const VALUATION_COVERAGE_STATUSES = new Set(['covered', 'partial', 'unpriced', 'stale', 'invalid']);
 const RISK_POLICY_VERSION = 'finance-risk-input-policy.v1';
 const RISK_METRIC_DEFINITIONS_VERSION = 'finance-risk-metric-definitions.v1';
-const RISK_METRIC_DEFINITIONS_STATUS = 'pending_owner_review';
+const RISK_METRIC_DEFINITIONS_STATUS = 'approved_contract_baseline';
 const RISK_FX_CONTRACT_VERSION = 'finance.fx-snapshot.v1';
-const RISK_FX_CONTRACT_STATUS = 'proposed-pending-owner-review';
+const RISK_FX_CONTRACT_STATUS = 'approved-contract-baseline';
 const RISK_FX_POLICY = 'single_currency_only';
 const RISK_FRESHNESS_MAX_AGE_HOURS: Record<string, number> = {
   exchange: 24,

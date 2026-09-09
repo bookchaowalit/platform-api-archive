@@ -20,7 +20,10 @@ import {
 
 startTelemetry();
 
-const PORT = process.env.PORT || 3001;
+const PORT = parseInt(process.env.PORT || '3001', 10);
+// Local development binds to loopback. A hosted deployment must explicitly
+// opt in to a public bind behind its authenticated ingress.
+const API_HOST = process.env.API_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 const API_TOKEN = process.env.API_TOKEN || '';  // Bearer token for write routes
 const MAX_BODY_SIZE = parseInt(process.env.MAX_BODY_SIZE || '1048576'); // 1MB default
 const execFileAsync = promisify(execFile);
@@ -141,7 +144,9 @@ function sendJson(
 ) {
   const headers = req
     ? getCorsHeaders(req)
-    : { ...corsHeaders, 'Access-Control-Allow-Origin': '*' };
+    // Internal callers do not have a browser origin. Do not turn an omitted
+    // request object into a wildcard CORS response.
+    : { ...corsHeaders };
   if (requestId) headers['X-Request-ID'] = requestId;
   if (extraHeaders) Object.assign(headers, extraHeaders);
   res.writeHead(status, headers);
@@ -739,7 +744,10 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     if (path.match(/^\/api\/skills\/[\w-]+$/) && method === 'GET') {
       const slug = path.split('/').pop();
       const skill = db.prepare(`
-        SELECT s.*, sc.name as category_name, sc.slug as category_slug
+        SELECT s.id, s.name, s.slug, s.description, s.level, s.target_level,
+               s.status, s.progress_percent, s.hours_invested,
+               s.started_at, s.target_completion_date, s.last_practiced,
+               sc.name as category_name, sc.slug as category_slug
         FROM skills s
         LEFT JOIN skill_categories sc ON s.category_id = sc.id
         WHERE s.slug = ?
@@ -754,7 +762,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       const type = url.searchParams.get('type');
       const status = url.searchParams.get('status');
 
-      let query = 'SELECT id, name, type, description, url, platform, status, views, subscribers, revenue FROM assets WHERE 1=1';
+      // Public assets are limited to launched/maintained records. Financial
+      // valuation and revenue columns remain internal to the control plane.
+      let query = "SELECT id, name, type, description, url, platform, status, views, subscribers FROM assets WHERE status IN ('active', 'maintenance')";
       const args: any[] = [];
 
       if (type) { query += ' AND type = ?'; args.push(type); }
@@ -1519,8 +1529,8 @@ async function startServer() {
   await initDb();
 
   const server = createServer(handleRequest);
-  server.listen(PORT, () => {
-    console.log(`Solo Empire API running on http://localhost:${PORT}`);
+  server.listen(PORT, API_HOST, () => {
+    console.log(`Solo Empire API running on http://${API_HOST}:${PORT}`);
     console.log(`Health check: http://localhost:${PORT}/health`);
     console.log(`Profile: http://localhost:${PORT}/api/profile`);
     console.log(`Skills: http://localhost:${PORT}/api/skills`);
