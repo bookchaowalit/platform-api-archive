@@ -71,8 +71,19 @@ export interface AiGatewayStatus {
   adapter: 'openai-compatible' | 'none';
   base_url_configured: boolean;
   api_key_configured: boolean;
+  rate_cards_configured: boolean;
   models: Record<AiProfile, string | null>;
   limits: { max_context_chars: number; max_output_tokens: number; default_token_budget: number; timeout_ms: number };
+  rate_limit: {
+    contract: 'solo-empire.ai-rate-limit.v1';
+    enabled: true;
+    max_requests_per_minute: number;
+    max_concurrent_requests: number;
+    window_ms: number;
+    active_requests: number;
+    tracked_subjects: number;
+    configuration_error?: string;
+  };
   reason?: string;
 }
 export interface AiGenerateResponse {

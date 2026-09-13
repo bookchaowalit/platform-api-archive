@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { AiBudgetError, type AiBudgetGuard } from './ai_budget.js';
 
 export const AI_GATEWAY_CONTRACT = 'solo-empire.ai-gateway.v1';
 export const AI_TELEMETRY_CONTRACT = 'solo-empire.ai-telemetry.v1';
@@ -80,6 +81,7 @@ export interface AiGatewayStatus {
   adapter: 'openai-compatible' | 'none';
   base_url_configured: boolean;
   api_key_configured: boolean;
+  rate_cards_configured: boolean;
   models: Record<AiProfile, string | null>;
   limits: {
     max_context_chars: number;
@@ -88,6 +90,11 @@ export interface AiGatewayStatus {
     timeout_ms: number;
   };
   reason?: string;
+}
+
+export interface AiGenerateOptions {
+  budgetGuard?: AiBudgetGuard;
+  recordTelemetry?: (event: AiTelemetryEvent) => void;
 }
 
 export class AiGatewayError extends Error {
@@ -152,6 +159,11 @@ function safeName(value: string | undefined, fallback: string): string {
   return /^[A-Za-z0-9_.:/-]{1,100}$/.test(candidate) ? candidate : fallback;
 }
 
+function modelName(value: string | undefined, fallback: string): string {
+  const candidate = value === undefined || value.trim() === '' ? fallback : value.trim();
+  return safeName(candidate, '');
+}
+
 function validateBaseUrl(raw: string, env: NodeJS.ProcessEnv): URL {
   let parsed: URL;
   try {
@@ -186,12 +198,18 @@ function readConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
 
   const defaultModel = safeName(env.AI_GATEWAY_MODEL, '');
   const models = {
-    fast: safeName(env.AI_GATEWAY_MODEL_FAST, defaultModel),
-    balanced: safeName(env.AI_GATEWAY_MODEL_BALANCED, defaultModel),
-    quality: safeName(env.AI_GATEWAY_MODEL_QUALITY, defaultModel),
+    fast: modelName(env.AI_GATEWAY_MODEL_FAST, defaultModel),
+    balanced: modelName(env.AI_GATEWAY_MODEL_BALANCED, defaultModel),
+    quality: modelName(env.AI_GATEWAY_MODEL_QUALITY, defaultModel),
   };
   if (!models.fast || !models.balanced || !models.quality) {
     throw new AiGatewayError(503, 'AI gateway model mapping is not configured');
+  }
+
+  const inputRatePer1k = nonNegativeRate(env.AI_GATEWAY_INPUT_USD_PER_1K);
+  const outputRatePer1k = nonNegativeRate(env.AI_GATEWAY_OUTPUT_USD_PER_1K);
+  if (inputRatePer1k === null || outputRatePer1k === null) {
+    throw new AiGatewayError(503, 'AI gateway input/output rate cards are not configured');
   }
 
   return {
@@ -204,22 +222,25 @@ function readConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
     maxOutputTokens: boundedInt(env.AI_GATEWAY_MAX_OUTPUT_TOKENS, 4_096, 128, 16_384),
     defaultTokenBudget: boundedInt(env.AI_GATEWAY_DEFAULT_TOKEN_BUDGET, 4_096, 256, 32_768),
     timeoutMs: boundedInt(env.AI_GATEWAY_TIMEOUT_MS, 30_000, 1_000, 120_000),
-    inputRatePer1k: nonNegativeRate(env.AI_GATEWAY_INPUT_USD_PER_1K),
-    outputRatePer1k: nonNegativeRate(env.AI_GATEWAY_OUTPUT_USD_PER_1K),
+    inputRatePer1k,
+    outputRatePer1k,
   };
 }
 
 export function getAiGatewayStatus(env: NodeJS.ProcessEnv = process.env): AiGatewayStatus {
+  const defaultModel = safeName(env.AI_GATEWAY_MODEL, '');
   const common = {
     contract: AI_GATEWAY_CONTRACT as typeof AI_GATEWAY_CONTRACT,
     response_language: AI_RESPONSE_LANGUAGE,
     adapter: 'none' as const,
     base_url_configured: Boolean(env.AI_GATEWAY_BASE_URL),
     api_key_configured: Boolean(env.AI_GATEWAY_API_KEY),
+    rate_cards_configured: nonNegativeRate(env.AI_GATEWAY_INPUT_USD_PER_1K) !== null
+      && nonNegativeRate(env.AI_GATEWAY_OUTPUT_USD_PER_1K) !== null,
     models: {
-      fast: env.AI_GATEWAY_MODEL_FAST || env.AI_GATEWAY_MODEL || null,
-      balanced: env.AI_GATEWAY_MODEL_BALANCED || env.AI_GATEWAY_MODEL || null,
-      quality: env.AI_GATEWAY_MODEL_QUALITY || env.AI_GATEWAY_MODEL || null,
+      fast: modelName(env.AI_GATEWAY_MODEL_FAST, defaultModel) || null,
+      balanced: modelName(env.AI_GATEWAY_MODEL_BALANCED, defaultModel) || null,
+      quality: modelName(env.AI_GATEWAY_MODEL_QUALITY, defaultModel) || null,
     },
     limits: {
       max_context_chars: boundedInt(env.AI_GATEWAY_MAX_CONTEXT_CHARS, 48_000, 1_024, 200_000),
@@ -240,7 +261,7 @@ export function getAiGatewayStatus(env: NodeJS.ProcessEnv = process.env): AiGate
     return {
       ...common,
       configured: false,
-      provider: env.AI_GATEWAY_PROVIDER || null,
+      provider: safeName(env.AI_GATEWAY_PROVIDER, '') || null,
       reason: error instanceof AiGatewayError ? error.message : 'AI gateway configuration is invalid',
     };
   }
@@ -313,7 +334,7 @@ function integerOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
-function telemetryForError(runId: string, request: { route: string; prompt_version: string; tokenBudget: number }, provider: string | null, model: string | null, latencyMs: number, status: 'error' = 'error', errorClass?: string): AiTelemetryEvent {
+function telemetryForError(runId: string, request: { route: string; prompt_version: string; tokenBudget: number }, provider: string | null, model: string | null, latencyMs: number, status: 'error' | 'budget_exceeded' = 'error', errorClass?: string): AiTelemetryEvent {
   return {
     run_id: runId,
     route: request.route,
@@ -325,14 +346,14 @@ function telemetryForError(runId: string, request: { route: string; prompt_versi
     total_tokens: null,
     token_budget: request.tokenBudget,
     latency_ms: latencyMs,
-    estimated_cost_usd: null,
+    estimated_cost_usd: status === 'budget_exceeded' ? 0 : null,
     cache_hit: false,
     status,
     metadata: { contract: AI_GATEWAY_CONTRACT, error_class: errorClass || 'provider_error' },
   };
 }
 
-export async function generateAi(input: unknown, env: NodeJS.ProcessEnv = process.env): Promise<{ response: AiGenerateResponse; telemetry: AiTelemetryEvent }> {
+export async function generateAi(input: unknown, env: NodeJS.ProcessEnv = process.env, options: AiGenerateOptions = {}): Promise<{ response: AiGenerateResponse; telemetry: AiTelemetryEvent }> {
   const runId = randomUUID();
   const started = performance.now();
   let config: GatewayConfig;
@@ -344,91 +365,131 @@ export async function generateAi(input: unknown, env: NodeJS.ProcessEnv = proces
   }
   const request = validateRequest(input, config);
   const model = config.models[request.profile];
+  // Byte count provides a conservative text-token allowance, including Thai;
+  // chars / 4 is only a heuristic and must not be used as a cost ceiling.
+  const estimatedInputTokens = request.messages.reduce((sum, message) => sum + Buffer.byteLength(message.content, 'utf8') + 32, 0);
+  const estimatedCost = config.inputRatePer1k !== null && config.outputRatePer1k !== null
+    ? Number(((estimatedInputTokens * config.inputRatePer1k + request.maxOutputTokens * config.outputRatePer1k) / 1000).toFixed(8))
+    : null;
+  let releaseBudget: (() => void) | undefined;
+  try {
+    releaseBudget = options.budgetGuard ? await options.budgetGuard.reserve(estimatedCost) : undefined;
+  } catch (error) {
+    if (error instanceof AiBudgetError) {
+      const latencyMs = Number((performance.now() - started).toFixed(3));
+      throw new AiGatewayError(429, 'AI monthly budget guard denied the request', telemetryForError(runId, request, config.providerName, model, latencyMs, 'budget_exceeded', error.reason));
+    }
+    throw error;
+  }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
-  let providerResponse: Response;
-  try {
-    providerResponse = await fetch(endpoint(config.baseUrl), {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({ model, messages: request.messages, temperature: request.temperature, max_tokens: request.maxOutputTokens, stream: false }),
-    });
-  } catch (error) {
-    const latencyMs = Number((performance.now() - started).toFixed(3));
-    const errorClass = error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'network_error';
-    throw new AiGatewayError(errorClass === 'timeout' ? 504 : 502, `AI provider ${errorClass}`, telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', errorClass));
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const latencyMs = Number((performance.now() - started).toFixed(3));
-  if (!providerResponse.ok) {
-    const errorClass = providerResponse.status === 429 ? 'rate_limited' : providerResponse.status === 401 || providerResponse.status === 403 ? 'provider_auth' : 'provider_rejected';
-    const status = providerResponse.status === 429 ? 429 : 502;
-    throw new AiGatewayError(status, `AI provider ${errorClass}`, telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', errorClass));
-  }
-
-  let payload: any;
-  try {
-    payload = await providerResponse.json();
-  } catch {
-    throw new AiGatewayError(502, 'AI provider returned invalid JSON', telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', 'invalid_json'));
-  }
-  const content = payload?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') {
-    throw new AiGatewayError(502, 'AI provider response did not contain text content', telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', 'invalid_response'));
-  }
-  const inputTokens = integerOrNull(payload?.usage?.prompt_tokens ?? payload?.usage?.input_tokens);
-  const outputTokens = integerOrNull(payload?.usage?.completion_tokens ?? payload?.usage?.output_tokens);
-  const totalTokens = integerOrNull(payload?.usage?.total_tokens) ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null);
-  const usage: AiUsage = { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: totalTokens, source: totalTokens === null ? 'unavailable' : 'provider' };
-  const estimatedCost = inputTokens !== null && outputTokens !== null && (config.inputRatePer1k !== null || config.outputRatePer1k !== null)
-    ? Number(((inputTokens * (config.inputRatePer1k || 0) + outputTokens * (config.outputRatePer1k || 0)) / 1000).toFixed(8))
-    : null;
-  const status = totalTokens !== null && totalTokens > request.tokenBudget ? 'budget_exceeded' : 'success';
-  const telemetry: AiTelemetryEvent = {
-    run_id: runId,
-    route: request.route,
-    prompt_version: request.prompt_version,
-    provider: config.providerName,
-    model,
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    total_tokens: totalTokens,
-    token_budget: request.tokenBudget,
-    latency_ms: latencyMs,
-    estimated_cost_usd: estimatedCost,
-    cache_hit: false,
-    status,
-    metadata: {
-      contract: AI_GATEWAY_CONTRACT,
-      profile: request.profile,
-      privacy_class: request.privacyClass,
-      usage_source: usage.source,
-      response_language: AI_RESPONSE_LANGUAGE,
-      response_language_policy: AI_RESPONSE_LANGUAGE_POLICY_VERSION,
-    },
+  let telemetryFailed = false;
+  const record = (event: AiTelemetryEvent) => {
+    try { options.recordTelemetry?.(event); }
+    catch (error) { telemetryFailed = true; throw error; }
   };
-  return {
-    response: {
-      contract: AI_GATEWAY_CONTRACT,
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+    let providerResponse: Response;
+    try {
+      providerResponse = await fetch(endpoint(config.baseUrl), {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify({ model, messages: request.messages, temperature: request.temperature, max_tokens: request.maxOutputTokens, stream: false }),
+      });
+    } catch (error) {
+      const latencyMs = Number((performance.now() - started).toFixed(3));
+      const errorClass = error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'network_error';
+      throw new AiGatewayError(errorClass === 'timeout' ? 504 : 502, `AI provider ${errorClass}`, telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', errorClass));
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const latencyMs = Number((performance.now() - started).toFixed(3));
+    if (!providerResponse.ok) {
+      const errorClass = providerResponse.status === 429 ? 'rate_limited' : providerResponse.status === 401 || providerResponse.status === 403 ? 'provider_auth' : 'provider_rejected';
+      const status = providerResponse.status === 429 ? 429 : 502;
+      throw new AiGatewayError(status, `AI provider ${errorClass}`, telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', errorClass));
+    }
+
+    let payload: any;
+    try {
+      payload = await providerResponse.json();
+    } catch {
+      throw new AiGatewayError(502, 'AI provider returned invalid JSON', telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', 'invalid_json'));
+    }
+    const content = payload?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') {
+      throw new AiGatewayError(502, 'AI provider response did not contain text content', telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', 'invalid_response'));
+    }
+    // Provider implementations can ignore max_tokens or return an unexpected
+    // payload. Keep the response bounded before it crosses the API boundary.
+    const maxResponseBytes = Math.min(
+      config.maxContextChars * 4,
+      Math.max(1_024, request.maxOutputTokens * 16),
+    );
+    if (Buffer.byteLength(content, 'utf8') > maxResponseBytes) {
+      throw new AiGatewayError(502, 'AI provider response exceeded the output limit', telemetryForError(runId, request, config.providerName, model, latencyMs, 'error', 'invalid_response'));
+    }
+    const inputTokens = integerOrNull(payload?.usage?.prompt_tokens ?? payload?.usage?.input_tokens);
+    const outputTokens = integerOrNull(payload?.usage?.completion_tokens ?? payload?.usage?.output_tokens);
+    const totalTokens = integerOrNull(payload?.usage?.total_tokens) ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null);
+    const usage: AiUsage = { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: totalTokens, source: totalTokens === null ? 'unavailable' : 'provider' };
+    const actualCost = inputTokens !== null && outputTokens !== null && config.inputRatePer1k !== null && config.outputRatePer1k !== null
+      ? Number(((inputTokens * config.inputRatePer1k + outputTokens * config.outputRatePer1k) / 1000).toFixed(8))
+      : null;
+    const status = totalTokens !== null && totalTokens > request.tokenBudget ? 'budget_exceeded' : 'success';
+    const telemetry: AiTelemetryEvent = {
       run_id: runId,
-      status,
       route: request.route,
       prompt_version: request.prompt_version,
       provider: config.providerName,
       model,
-      content,
-      output_trust: 'untrusted_model_output',
-      finish_reason: typeof payload?.choices?.[0]?.finish_reason === 'string' ? payload.choices[0].finish_reason : null,
-      usage,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: totalTokens,
       token_budget: request.tokenBudget,
       latency_ms: latencyMs,
-      estimated_cost_usd: estimatedCost,
-    },
-    telemetry,
-  };
+      estimated_cost_usd: actualCost,
+      cache_hit: false,
+      status,
+      metadata: {
+        contract: AI_GATEWAY_CONTRACT,
+        profile: request.profile,
+        privacy_class: request.privacyClass,
+        usage_source: usage.source,
+        response_language: AI_RESPONSE_LANGUAGE,
+        response_language_policy: AI_RESPONSE_LANGUAGE_POLICY_VERSION,
+      },
+    };
+    record(telemetry);
+    return {
+      response: {
+        contract: AI_GATEWAY_CONTRACT,
+        run_id: runId,
+        status,
+        route: request.route,
+        prompt_version: request.prompt_version,
+        provider: config.providerName,
+        model,
+        content,
+        output_trust: 'untrusted_model_output',
+        finish_reason: typeof payload?.choices?.[0]?.finish_reason === 'string' ? payload.choices[0].finish_reason : null,
+        usage,
+        token_budget: request.tokenBudget,
+        latency_ms: latencyMs,
+        estimated_cost_usd: actualCost,
+      },
+      telemetry,
+    };
+  } catch (error) {
+    if (error instanceof AiGatewayError && error.telemetry && !telemetryFailed) record(error.telemetry);
+    throw error;
+  } finally {
+    // Persist spend before making this reservation available to another call.
+    // A failed telemetry write retains the reservation for operator recovery.
+    if (!telemetryFailed) releaseBudget?.();
+  }
 }

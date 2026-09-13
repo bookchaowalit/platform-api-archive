@@ -8,6 +8,8 @@ import { EXTERNAL_APP_REGISTRY, EXTERNAL_INTEGRATIONS, sanitizeIntegrationHealth
 import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
 import { verifyStripeSignature } from './stripe.js';
 import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
+import { AiBudgetError, createAiBudgetGuard, getAiBudgetStatus } from './ai_budget.js';
+import { aiRateLimitHeaders, createAiRateLimiter } from './ai_rate_limit.js';
 import { startTelemetry, withRequestSpan } from './telemetry.js';
 import { financeApiResponse } from './finance.js';
 import { newFinanceApiRequestId, recordFinanceApiAudit } from './audit.js';
@@ -26,6 +28,7 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 const API_HOST = process.env.API_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 const API_TOKEN = process.env.API_TOKEN || '';  // Bearer token for write routes
 const MAX_BODY_SIZE = parseInt(process.env.MAX_BODY_SIZE || '1048576'); // 1MB default
+const AI_RATE_LIMITER = createAiRateLimiter(process.env);
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const PYTHON_WRAPPER = join(REPO_ROOT, 'infra', 'scripts', 'setup', 'run-python3.sh');
@@ -589,7 +592,12 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       if (!auth.authorized) {
         return sendAuthFailure(res, req, auth);
       }
-      return sendJson(res, getAiGatewayStatus(), 200, req);
+      return sendJson(
+        res,
+        { ...getAiGatewayStatus(), budget: getAiBudgetStatus(db), rate_limit: AI_RATE_LIMITER.status() },
+        200,
+        req,
+      );
     }
 
     if (path === '/api/ai/generate' && method === 'POST') {
@@ -598,18 +606,41 @@ async function handleRequestInner(req: any, res: any, url: URL) {
         return sendAuthFailure(res, req, auth);
       }
       const body = await parseBody(req);
+      const rateLimit = AI_RATE_LIMITER.acquire(auth.subject || 'anonymous');
+      if (!rateLimit.allowed) {
+        const status = rateLimit.reason === 'configuration_error' ? 503 : 429;
+        return sendJson(
+          res,
+          {
+            error: status === 429 ? 'Too Many Requests' : 'AI gateway rate limiter is unavailable',
+            code: rateLimit.reason,
+            retry_after_seconds: rateLimit.retryAfterSeconds,
+          },
+          status,
+          req,
+          undefined,
+          aiRateLimitHeaders(rateLimit),
+        );
+      }
       try {
-        const result = await generateAi(body);
-        recordAiTelemetry(db, result.telemetry);
+        const result = await generateAi(body, process.env, {
+          budgetGuard: createAiBudgetGuard(db),
+          recordTelemetry: (event) => recordAiTelemetry(db, event),
+        });
         return sendJson(res, result.response, 200, req);
       } catch (error) {
-        if (error instanceof AiGatewayError && error.telemetry) {
+        if (error instanceof AiGatewayError && error.telemetry && (error.telemetry.estimated_cost_usd === 0 || error.telemetry.provider === null)) {
           recordAiTelemetry(db, error.telemetry);
         }
         if (error instanceof AiGatewayError) {
           throw new HttpError(error.status, error.message);
         }
+        if (error instanceof AiBudgetError) {
+          throw new HttpError(503, 'AI monthly budget guard is unavailable');
+        }
         throw error;
+      } finally {
+        rateLimit.release();
       }
     }
 
@@ -1523,6 +1554,10 @@ async function startServer() {
   }
   if (process.env.NODE_ENV === 'production' && financeRateLimitConfigurationError()) {
     console.error('ERROR: Finance API rate-limit configuration is invalid in production mode');
+    process.exit(1);
+  }
+  if (process.env.NODE_ENV === 'production' && AI_RATE_LIMITER.status().configuration_error) {
+    console.error('ERROR: AI gateway rate-limit configuration is invalid in production mode');
     process.exit(1);
   }
 
