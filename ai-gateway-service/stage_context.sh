@@ -30,5 +30,8 @@ for module in ai_gateway ai_budget ai_rate_limit auth; do
 done
 cp "$INFRA_DIR/database/migrations/025_ai_run_telemetry.sql" "$OUT/database/migrations/"
 cp "$SERVICE_DIR/railway.json" "$OUT/railway.json"
+# Railway `up --path-as-root` falls back to Railpack unless a Dockerfile sits at the
+# context root, so place the (context-root-relative) Dockerfile there as well.
+cp "$SERVICE_DIR/Dockerfile" "$OUT/Dockerfile"
 
 echo "$OUT"
