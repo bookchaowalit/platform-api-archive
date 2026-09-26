@@ -18,7 +18,7 @@ export type AuthResult = {
   error?: string;
 };
 
-type ScopedToken = {
+export type ScopedToken = {
   subject: string;
   tokenHash: string;
   scopes: string[];
@@ -32,19 +32,26 @@ const TOKEN_HASH_PATTERN = /^[a-f0-9]{64}$/i;
 const SUBJECT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const SCOPE_PATTERN = /^[a-z][a-z0-9:_-]{1,63}$/;
 
-let scopedTokens: ScopedToken[] = [];
-let scopedTokenConfigError: string | null = null;
+export interface ScopedTokenConfig {
+  tokens: ScopedToken[];
+  error: string | null;
+}
 
-function parseScopedTokens(): void {
-  if (!SCOPED_TOKEN_CONFIG) return;
+/**
+ * Parse API_TOKENS_JSON without reading process state. Invalid configuration
+ * yields no tokens plus an error so callers can fail closed.
+ */
+export function parseScopedTokenConfig(raw: string | undefined): ScopedTokenConfig {
+  const config = raw?.trim() || '';
+  if (!config) return { tokens: [], error: null };
 
   try {
-    const parsed: unknown = JSON.parse(SCOPED_TOKEN_CONFIG);
+    const parsed: unknown = JSON.parse(config);
     if (!Array.isArray(parsed) || parsed.length > 100) {
       throw new Error('API_TOKENS_JSON must be an array with at most 100 entries');
     }
 
-    scopedTokens = parsed.map((entry, index) => {
+    const tokens = parsed.map((entry, index) => {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
         throw new Error(`API_TOKENS_JSON entry ${index} must be an object`);
       }
@@ -73,13 +80,15 @@ function parseScopedTokens(): void {
 
       return { subject, tokenHash, scopes: [...new Set(scopes)], expiresAt };
     });
+    return { tokens, error: null };
   } catch (error) {
-    scopedTokens = [];
-    scopedTokenConfigError = error instanceof Error ? error.message : 'invalid scoped token configuration';
+    return { tokens: [], error: error instanceof Error ? error.message : 'invalid scoped token configuration' };
   }
 }
 
-parseScopedTokens();
+const parsedScopedTokens = parseScopedTokenConfig(SCOPED_TOKEN_CONFIG);
+const scopedTokens: ScopedToken[] = parsedScopedTokens.tokens;
+const scopedTokenConfigError: string | null = parsedScopedTokens.error;
 
 export function authConfigurationError(): string | null {
   return scopedTokenConfigError;
@@ -137,8 +146,12 @@ export function requireAuth(req: any, requiredScope = 'api:write'): AuthResult {
     return { authorized: true, subject: 'legacy-api-token', scopes: ['*'], method: 'legacy', requiredScope };
   }
 
+  return authenticateScopedToken(scopedTokens, presentedToken, requiredScope);
+}
+
+function authenticateScopedToken(tokens: ScopedToken[], presentedToken: string, requiredScope: string): AuthResult {
   const presentedHash = hashApiToken(presentedToken);
-  const scoped = scopedTokens.find(token => sameHash(token.tokenHash, presentedHash));
+  const scoped = tokens.find(token => sameHash(token.tokenHash, presentedHash));
   if (!scoped) return failure(requiredScope, 401, 'Invalid token');
   if (scoped.expiresAt && Date.parse(scoped.expiresAt) <= Date.now()) {
     return failure(requiredScope, 401, 'Token expired', scoped.subject, scoped.scopes, 'scoped');
@@ -153,5 +166,31 @@ export function requireAuth(req: any, requiredScope = 'api:write'): AuthResult {
     scopes: scoped.scopes,
     method: 'scoped',
     requiredScope,
+  };
+}
+
+export interface ScopedTokenAuthenticator {
+  configurationError: string | null;
+  tokenCount: number;
+  authenticate(req: any, requiredScope: string): AuthResult;
+}
+
+/**
+ * Scoped-only authenticator for standalone services. It never honors the
+ * legacy full-access API_TOKEN or ALLOW_UNAUTH_DEV, and it reads only the
+ * configuration passed in, so a hosted boundary cannot inherit local shortcuts.
+ */
+export function createScopedTokenAuthenticator(rawConfig: string | undefined): ScopedTokenAuthenticator {
+  const { tokens, error } = parseScopedTokenConfig(rawConfig);
+  return {
+    configurationError: error,
+    tokenCount: tokens.length,
+    authenticate(req: any, requiredScope: string): AuthResult {
+      if (error) return failure(requiredScope, 401, 'Authentication configuration is invalid');
+      const authHeader = typeof req?.headers?.authorization === 'string' ? req.headers.authorization : '';
+      const presentedToken = authHeader.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || '';
+      if (!presentedToken) return failure(requiredScope, 401, 'Missing Authorization header');
+      return authenticateScopedToken(tokens, presentedToken, requiredScope);
+    },
   };
 }

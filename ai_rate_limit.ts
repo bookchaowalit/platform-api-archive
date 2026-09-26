@@ -6,6 +6,11 @@
  * and never stores tokens, IP addresses, prompts, responses, or provider
  * payloads. A multi-replica deployment needs a shared limiter before it is
  * exposed to public traffic.
+ *
+ * AI_GATEWAY_SUBJECT_LIMITS_JSON optionally overrides the per-minute window
+ * and adds a per-subject concurrency cap for named subjects, e.g.
+ * {"ev3-web":{"max_requests_per_minute":120,"max_concurrent_requests":8}}.
+ * The process-wide AI_GATEWAY_MAX_CONCURRENT_REQUESTS cap always applies.
  */
 
 export const AI_RATE_LIMIT_CONTRACT = 'solo-empire.ai-rate-limit.v1' as const;
@@ -32,6 +37,7 @@ export interface AiRateLimitStatus {
   window_ms: number;
   active_requests: number;
   tracked_subjects: number;
+  subject_overrides: number;
   configuration_error?: string;
 }
 
@@ -45,10 +51,16 @@ type Bucket = {
   count: number;
 };
 
+type SubjectLimit = {
+  maxRequestsPerMinute: number | null;
+  maxConcurrentRequests: number | null;
+};
+
 type Config = {
   maxRequestsPerMinute: number;
   maxConcurrentRequests: number;
   windowMs: number;
+  subjectLimits: Map<string, SubjectLimit>;
   configurationError: string | null;
 };
 
@@ -75,6 +87,46 @@ function parseBoundedInteger(
   return { value, error: null };
 }
 
+const SUBJECT_LIMIT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+
+function optionalLimit(value: unknown, maximum: number, label: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`${label} must be an integer between 1 and ${maximum}`);
+  }
+  return value;
+}
+
+function parseSubjectLimits(raw: string | undefined): { limits: Map<string, SubjectLimit>; error: string | null } {
+  const limits = new Map<string, SubjectLimit>();
+  if (raw === undefined || raw.trim() === '') return { limits, error: null };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).length > 100) {
+      throw new Error('AI_GATEWAY_SUBJECT_LIMITS_JSON must be an object with at most 100 subjects');
+    }
+    for (const [subject, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!SUBJECT_LIMIT_PATTERN.test(subject) || !value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('AI_GATEWAY_SUBJECT_LIMITS_JSON has an invalid subject entry');
+      }
+      const entry = value as Record<string, unknown>;
+      if (Object.keys(entry).some((key) => key !== 'max_requests_per_minute' && key !== 'max_concurrent_requests')) {
+        throw new Error('AI_GATEWAY_SUBJECT_LIMITS_JSON has an unknown limit field');
+      }
+      limits.set(subject, {
+        maxRequestsPerMinute: optionalLimit(entry.max_requests_per_minute, MAX_REQUESTS_PER_MINUTE, 'AI_GATEWAY_SUBJECT_LIMITS_JSON max_requests_per_minute'),
+        maxConcurrentRequests: optionalLimit(entry.max_concurrent_requests, MAX_CONCURRENT_REQUESTS, 'AI_GATEWAY_SUBJECT_LIMITS_JSON max_concurrent_requests'),
+      });
+    }
+    return { limits, error: null };
+  } catch (error) {
+    const message = error instanceof Error && error.message.startsWith('AI_GATEWAY_SUBJECT_LIMITS_JSON')
+      ? error.message
+      : 'AI_GATEWAY_SUBJECT_LIMITS_JSON must be valid JSON';
+    return { limits: new Map(), error: message };
+  }
+}
+
 function readConfig(env: NodeJS.ProcessEnv): Config {
   const requests = parseBoundedInteger(
     env.AI_GATEWAY_MAX_REQUESTS_PER_MINUTE,
@@ -90,11 +142,13 @@ function readConfig(env: NodeJS.ProcessEnv): Config {
     MAX_CONCURRENT_REQUESTS,
     'AI_GATEWAY_MAX_CONCURRENT_REQUESTS',
   );
+  const subjects = parseSubjectLimits(env.AI_GATEWAY_SUBJECT_LIMITS_JSON);
   return {
     maxRequestsPerMinute: requests.value,
     maxConcurrentRequests: concurrency.value,
     windowMs: WINDOW_MS,
-    configurationError: requests.error || concurrency.error,
+    subjectLimits: subjects.limits,
+    configurationError: requests.error || concurrency.error || subjects.error,
   };
 }
 
@@ -111,6 +165,7 @@ function emptyRelease(): void {
 class LocalAiRateLimiter implements AiRateLimiter {
   private readonly config: Config;
   private readonly buckets = new Map<string, Bucket>();
+  private readonly activeBySubject = new Map<string, number>();
   private activeRequests = 0;
 
   constructor(env: NodeJS.ProcessEnv) {
@@ -147,6 +202,9 @@ class LocalAiRateLimiter implements AiRateLimiter {
 
     this.evictExpired(now);
     const key = safeSubject(subject);
+    const subjectLimit = this.config.subjectLimits.get(key);
+    const maxRequestsPerMinute = subjectLimit?.maxRequestsPerMinute ?? this.config.maxRequestsPerMinute;
+    const subjectActive = this.activeBySubject.get(key) || 0;
     const existing = this.buckets.get(key);
     const bucket = !existing || now - existing.windowStartedAt >= this.config.windowMs
       ? { windowStartedAt: now, count: 0 }
@@ -155,12 +213,12 @@ class LocalAiRateLimiter implements AiRateLimiter {
     this.buckets.set(key, bucket);
 
     const resetAt = resetAtFor(bucket.windowStartedAt);
-    const remaining = Math.max(0, this.config.maxRequestsPerMinute - bucket.count);
-    if (bucket.count > this.config.maxRequestsPerMinute) {
+    const remaining = Math.max(0, maxRequestsPerMinute - bucket.count);
+    if (bucket.count > maxRequestsPerMinute) {
       return {
         allowed: false,
         reason: 'rate_limited',
-        limit: this.config.maxRequestsPerMinute,
+        limit: maxRequestsPerMinute,
         remaining,
         resetAt,
         retryAfterSeconds: Math.max(1, resetAt - Math.floor(now / 1000)),
@@ -170,36 +228,42 @@ class LocalAiRateLimiter implements AiRateLimiter {
       };
     }
 
-    if (this.activeRequests >= this.config.maxConcurrentRequests) {
+    const subjectConcurrency = subjectLimit?.maxConcurrentRequests ?? null;
+    if (this.activeRequests >= this.config.maxConcurrentRequests
+      || (subjectConcurrency !== null && subjectActive >= subjectConcurrency)) {
       return {
         allowed: false,
         reason: 'concurrency_limited',
-        limit: this.config.maxRequestsPerMinute,
+        limit: maxRequestsPerMinute,
         remaining,
         resetAt,
         retryAfterSeconds: 1,
         activeRequests: this.activeRequests,
-        maxConcurrentRequests: this.config.maxConcurrentRequests,
+        maxConcurrentRequests: subjectConcurrency ?? this.config.maxConcurrentRequests,
         release: emptyRelease,
       };
     }
 
     this.activeRequests += 1;
+    this.activeBySubject.set(key, subjectActive + 1);
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       this.activeRequests = Math.max(0, this.activeRequests - 1);
+      const current = (this.activeBySubject.get(key) || 1) - 1;
+      if (current > 0) this.activeBySubject.set(key, current);
+      else this.activeBySubject.delete(key);
     };
     return {
       allowed: true,
       reason: 'allowed',
-      limit: this.config.maxRequestsPerMinute,
+      limit: maxRequestsPerMinute,
       remaining,
       resetAt,
       retryAfterSeconds: 0,
       activeRequests: this.activeRequests,
-      maxConcurrentRequests: this.config.maxConcurrentRequests,
+      maxConcurrentRequests: subjectConcurrency ?? this.config.maxConcurrentRequests,
       release,
     };
   }
@@ -213,6 +277,7 @@ class LocalAiRateLimiter implements AiRateLimiter {
       window_ms: this.config.windowMs,
       active_requests: this.activeRequests,
       tracked_subjects: this.buckets.size,
+      subject_overrides: this.config.subjectLimits.size,
       ...(this.config.configurationError ? { configuration_error: this.config.configurationError } : {}),
     };
   }
