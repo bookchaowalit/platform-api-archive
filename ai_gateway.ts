@@ -26,6 +26,8 @@ export interface AiMessage {
 
 export interface AiGenerateRequest {
   route: string;
+  /** Optional per-request reasoning effort; overrides AI_GATEWAY_REASONING_EFFORT for this call only. */
+  reasoning_effort?: string;
   prompt_version: string;
   messages: AiMessage[];
   profile?: AiProfile;
@@ -93,6 +95,7 @@ export interface AiGatewayStatus {
     token_param: AiTokenParam | null;
     send_temperature: boolean | null;
     reasoning_effort: string | null;
+    request_reasoning_efforts: string[];
     error_cost_policy: AiErrorCostPolicy | null;
     response_formats: AiResponseFormat[];
   };
@@ -102,6 +105,7 @@ export interface AiGatewayStatus {
     default_token_budget: number;
     max_token_budget: number;
     timeout_ms: number;
+    reasoning_timeout_ms: number;
   };
   reason?: string;
 }
@@ -134,6 +138,7 @@ interface GatewayConfig {
   defaultTokenBudget: number;
   maxTokenBudget: number;
   timeoutMs: number;
+  reasoningTimeoutMs: number;
   inputRatePer1k: number | null;
   outputRatePer1k: number | null;
   fallbackModels: Record<AiProfile, string | null>;
@@ -151,6 +156,8 @@ interface RequestOptions {
   reasoningEffort: string | null;
   errorCostPolicy: AiErrorCostPolicy;
 }
+
+const REQUEST_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 
 const PROFILE_DEFAULT_OUTPUT: Record<AiProfile, number> = {
   fast: 512,
@@ -316,6 +323,13 @@ function readConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
     maxOutputTokens: boundedInt(env.AI_GATEWAY_MAX_OUTPUT_TOKENS, 4_096, 128, 16_384),
     ...tokenBudgetLimits(env),
     timeoutMs: boundedInt(env.AI_GATEWAY_TIMEOUT_MS, 30_000, 1_000, 120_000),
+    // Calls that request their own reasoning effort may think longer; other callers keep timeoutMs.
+    reasoningTimeoutMs: boundedInt(
+      env.AI_GATEWAY_REASONING_TIMEOUT_MS,
+      boundedInt(env.AI_GATEWAY_TIMEOUT_MS, 30_000, 1_000, 120_000),
+      1_000,
+      120_000,
+    ),
     inputRatePer1k,
     outputRatePer1k,
     fallbackModels: fallbacks,
@@ -351,6 +365,7 @@ export function getAiGatewayStatus(env: NodeJS.ProcessEnv = process.env): AiGate
         token_param: options?.tokenParam ?? null,
         send_temperature: options?.sendTemperature ?? null,
         reasoning_effort: options?.reasoningEffort ?? null,
+        request_reasoning_efforts: [...REQUEST_REASONING_EFFORTS],
         error_cost_policy: options?.errorCostPolicy ?? null,
         response_formats: [...RESPONSE_FORMATS],
       };
@@ -361,6 +376,12 @@ export function getAiGatewayStatus(env: NodeJS.ProcessEnv = process.env): AiGate
       default_token_budget: tokenBudgetLimits(env).defaultTokenBudget,
       max_token_budget: tokenBudgetLimits(env).maxTokenBudget,
       timeout_ms: boundedInt(env.AI_GATEWAY_TIMEOUT_MS, 30_000, 1_000, 120_000),
+      reasoning_timeout_ms: boundedInt(
+        env.AI_GATEWAY_REASONING_TIMEOUT_MS,
+        boundedInt(env.AI_GATEWAY_TIMEOUT_MS, 30_000, 1_000, 120_000),
+        1_000,
+        120_000,
+      ),
     },
   };
   try {
@@ -388,6 +409,7 @@ function validateRequest(input: unknown, config: GatewayConfig): Required<Pick<A
   maxOutputTokens: number;
   temperature: number;
   responseFormat: AiResponseFormat | null;
+  reasoningEffort: string | null;
 } {
   if (!input || typeof input !== 'object') throw new AiGatewayError(400, 'Request body must be a JSON object');
   const value = input as Record<string, unknown>;
@@ -453,7 +475,16 @@ function validateRequest(input: unknown, config: GatewayConfig): Required<Pick<A
     }
   }
 
-  return { route, prompt_version: promptVersion, messages: messagesWithLanguagePolicy, profile, privacyClass, tokenBudget, maxOutputTokens, temperature, responseFormat };
+  let reasoningEffort: string | null = null;
+  if (value.reasoning_effort !== undefined) {
+    const effort = typeof value.reasoning_effort === 'string' ? value.reasoning_effort.trim().toLowerCase() : '';
+    if (!REQUEST_REASONING_EFFORTS.has(effort)) {
+      throw new AiGatewayError(400, `reasoning_effort must be one of ${[...REQUEST_REASONING_EFFORTS].join(', ')}`);
+    }
+    reasoningEffort = effort;
+  }
+
+  return { route, prompt_version: promptVersion, messages: messagesWithLanguagePolicy, profile, privacyClass, tokenBudget, maxOutputTokens, temperature, responseFormat, reasoningEffort };
 }
 
 function endpoint(baseUrl: URL): URL {
@@ -521,11 +552,12 @@ async function callProvider(config: GatewayConfig, request: ValidatedRequest, mo
   const body: Record<string, unknown> = { model, messages: request.messages, stream: false };
   body[config.tokenParam] = request.maxOutputTokens;
   if (config.sendTemperature) body.temperature = request.temperature;
-  if (config.reasoningEffort) body.reasoning_effort = config.reasoningEffort;
+  const reasoningEffort = request.reasoningEffort ?? config.reasoningEffort;
+  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
   if (request.responseFormat === 'json_object') body.response_format = { type: 'json_object' };
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), request.reasoningEffort ? config.reasoningTimeoutMs : config.timeoutMs);
   let providerResponse: Response;
   let payload: any;
   try {
