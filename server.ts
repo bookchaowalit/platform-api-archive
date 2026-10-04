@@ -6,6 +6,10 @@ import { promisify } from 'util';
 import { join } from 'path';
 import { EXTERNAL_APP_REGISTRY, EXTERNAL_INTEGRATIONS, sanitizeIntegrationHealth } from './integrations.js';
 import { BUILDING_BLOCK_FILTERS, buildingBlocksResponse, type BuildingBlockFilter } from './building_blocks.js';
+import { PlatformInputError } from './platform/errors.js';
+import { invoicePreview, taxQuote } from './platform/thai_tax.js';
+import { presignFile, r2ConfigFromEnv } from './platform/files.js';
+import { sendEmail } from './platform/email.js';
 import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
 import { verifyStripeSignature } from './stripe.js';
 import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
@@ -853,6 +857,47 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       return sendJson(res, buildingBlocksResponse(filter), 200, req);
     }
 
+    // POST /api/platform/commerce/tax/quote - Thai VAT and withholding for one amount.
+    if (path === '/api/platform/commerce/tax/quote' && method === 'POST') {
+      const auth = requireAuth(req, 'api:read');
+      if (!auth.authorized) {
+        return sendAuthFailure(res, req, auth);
+      }
+      return sendJson(res, taxQuote(await parseBody(req)), 200, req);
+    }
+
+    // POST /api/platform/billing/invoices/preview - Thai invoice totals; issues nothing.
+    if (path === '/api/platform/billing/invoices/preview' && method === 'POST') {
+      const auth = requireAuth(req, 'api:read');
+      if (!auth.authorized) {
+        return sendAuthFailure(res, req, auth);
+      }
+      return sendJson(res, invoicePreview(await parseBody(req)), 200, req);
+    }
+
+    // POST /api/platform/files/presign - short-lived R2 upload/download URL.
+    if (path === '/api/platform/files/presign' && method === 'POST') {
+      const auth = requireAuth(req, 'api:write');
+      if (!auth.authorized) {
+        return sendAuthFailure(res, req, auth);
+      }
+      const r2 = r2ConfigFromEnv();
+      if (!r2) {
+        return sendJson(res, { error: 'File storage is not configured' }, 503, req);
+      }
+      return sendJson(res, presignFile(await parseBody(req), r2), 200, req);
+    }
+
+    // POST /api/platform/messages/email - Resend delivery; dry-run until enabled.
+    if (path === '/api/platform/messages/email' && method === 'POST') {
+      const auth = requireAuth(req, 'api:write');
+      if (!auth.authorized) {
+        return sendAuthFailure(res, req, auth);
+      }
+      const result = await sendEmail(await parseBody(req));
+      return sendJson(res, result, result.status === 'sent' ? 202 : 200, req);
+    }
+
     // GET /api/integrations - catalog of direct external API boundaries.
     if (path === '/api/integrations' && method === 'GET') {
       return sendJson(res, {
@@ -1547,8 +1592,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
 
   } catch (error: any) {
     console.error('Error:', error);
-    const status = error instanceof HttpError ? error.status : 500;
-    const message = status >= 500 ? 'Internal server error' : error.message;
+    const known = error instanceof HttpError || error instanceof PlatformInputError;
+    const status = known ? error.status : 500;
+    const message = status >= 500 && !(error instanceof PlatformInputError) ? 'Internal server error' : error.message;
     return sendJson(res, { error: message }, status, req);
   }
 }
