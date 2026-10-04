@@ -10,6 +10,7 @@ import { PlatformInputError } from './platform/errors.js';
 import { invoicePreview, taxQuote } from './platform/thai_tax.js';
 import { presignFile, r2ConfigFromEnv } from './platform/files.js';
 import { sendEmail } from './platform/email.js';
+import { identityConfigFromEnv, verifySessionRequest, type IdentityConfig } from './platform/identity.js';
 import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
 import { verifyStripeSignature } from './stripe.js';
 import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
@@ -896,6 +897,25 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       }
       const result = await sendEmail(await parseBody(req));
       return sendJson(res, result, result.status === 'sent' ? 202 : 200, req);
+    }
+
+    // POST /api/platform/identity/verify - verify an end-user OIDC session token
+    // issued by the configured identity provider; returns identifiers only.
+    if (path === '/api/platform/identity/verify' && method === 'POST') {
+      const auth = requireAuth(req, 'api:read');
+      if (!auth.authorized) {
+        return sendAuthFailure(res, req, auth);
+      }
+      let identity: IdentityConfig | null = null;
+      try {
+        identity = identityConfigFromEnv();
+      } catch {
+        identity = null;
+      }
+      if (!identity) {
+        return sendJson(res, { error: 'Identity provider is not configured' }, 503, req);
+      }
+      return sendJson(res, await verifySessionRequest(await parseBody(req), identity), 200, req);
     }
 
     // GET /api/integrations - catalog of direct external API boundaries.
