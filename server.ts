@@ -5,6 +5,7 @@ import { fileURLToPath, URL } from 'url';
 import { promisify } from 'util';
 import { join } from 'path';
 import { EXTERNAL_APP_REGISTRY, EXTERNAL_INTEGRATIONS, sanitizeIntegrationHealth } from './integrations.js';
+import { BUILDING_BLOCK_FILTERS, buildingBlocksResponse, type BuildingBlockFilter } from './building_blocks.js';
 import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
 import { verifyStripeSignature } from './stripe.js';
 import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
@@ -835,6 +836,21 @@ async function handleRequestInner(req: any, res: any, url: URL) {
 
       if (!item) return sendJson(res, { error: 'Not found' }, 404, req);
       return sendJson(res, { content: item }, 200, req);
+    }
+
+    // GET /api/platform/building-blocks - which central gateway, SDK, edge rule,
+    // or platform binding every app uses per capability. Read-only catalog.
+    if (path === '/api/platform/building-blocks' && method === 'GET') {
+      const auth = requireAuth(req, 'api:read');
+      if (!auth.authorized) {
+        return sendAuthFailure(res, req, auth);
+      }
+      const filter: BuildingBlockFilter = {};
+      for (const key of BUILDING_BLOCK_FILTERS) {
+        const value = url.searchParams.get(key);
+        if (value) filter[key] = value;
+      }
+      return sendJson(res, buildingBlocksResponse(filter), 200, req);
     }
 
     // GET /api/integrations - catalog of direct external API boundaries.
