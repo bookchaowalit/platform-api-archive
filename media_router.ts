@@ -23,7 +23,17 @@ export type PrivacyClass = 'public' | 'internal' | 'private' | 'restricted';
 export interface OwnEval {
   evaluated_at: string;
   sample_count: number;
+  /** Error rate per language in percent; lower is better. */
   wer_pct: Partial<Record<MediaLanguage, number>>;
+  /** Measure behind wer_pct per language: Thai uses cer, English wer. */
+  metric?: Partial<Record<MediaLanguage, 'cer' | 'wer'>>;
+}
+
+export interface ProviderPricing {
+  usd_per_hour: number | null;
+  free_hours_per_month: number | null;
+  source: string | null;
+  checked_at: string;
 }
 
 export interface ProviderEntry {
@@ -33,6 +43,7 @@ export interface ProviderEntry {
   languages: MediaLanguage[];
   features: string[];
   url_input_field: string;
+  pricing?: ProviderPricing;
   own_eval: OwnEval | null;
 }
 
