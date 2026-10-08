@@ -5,6 +5,7 @@
  *   GET  /healthz          no auth, no configuration detail
  *   GET  /api/ai/status    scope api:read
  *   POST /api/ai/generate  scope ai:generate
+ *   POST /api/media/route  scope ai:generate (metadata-only transcription routing)
  *
  * It reuses the shared gateway modules (contract solo-empire.ai-gateway.v1,
  * Thai-first policy, budget guard, rate limiter) but none of the local
@@ -18,6 +19,7 @@ import { AI_GATEWAY_CONTRACT, AiGatewayError, generateAi, getAiGatewayStatus, ty
 import { AiBudgetError, createAiBudgetGuard, getAiBudgetStatus } from '../ai_budget.js';
 import { aiRateLimitHeaders, createAiRateLimiter, type AiRateLimiter } from '../ai_rate_limit.js';
 import { createScopedTokenAuthenticator, type AuthResult } from '../auth.js';
+import { decideMediaRoute, MediaRouteError, parseMediaRouteInput } from '../media_router.js';
 import type { TelemetryStore } from './store.js';
 
 export const AI_GATEWAY_SERVICE_CONTRACT = 'solo-empire.ai-gateway-service.v1' as const;
@@ -342,7 +344,43 @@ export function createAiGatewayService(options: AiGatewayServiceOptions): AiGate
       return handleGenerate(req, res);
     }
 
+    if (path === '/api/media/route') {
+      if (method !== 'POST') return sendError(res, 405, 'Method Not Allowed', 'method_not_allowed', { Allow: 'POST' });
+      return handleMediaRoute(req, res);
+    }
+
     return sendError(res, 404, 'Not Found', 'not_found');
+  }
+
+  async function handleMediaRoute(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const result = auth.authenticate(req, 'ai:generate');
+    if (!result.authorized || result.method !== 'scoped' || !result.subject) {
+      return authFailure(res, result.authorized ? { ...result, authorized: false, status: 401 } : result);
+    }
+    let body: unknown;
+    try {
+      body = await readJsonBody(req, maxBodyBytes);
+    } catch (error) {
+      const httpError = error instanceof HttpError ? error : new HttpError(400, 'Request body could not be read', 'invalid_body');
+      return sendError(res, httpError.status, httpError.message, httpError.code, httpError.status === 413 || httpError.status === 415 ? { Connection: 'close' } : {});
+    }
+    try {
+      const decision = decideMediaRoute(parseMediaRouteInput(body), { env });
+      log({
+        ts: new Date().toISOString(),
+        event: 'media_route.decided',
+        subject: result.subject,
+        status: decision.status,
+        content_kind: decision.content_kind.value,
+        language: decision.language.value,
+        provider: decision.stt?.provider_id ?? null,
+        needs_review: decision.needs_review,
+      });
+      return sendJson(res, 200, decision);
+    } catch (error) {
+      if (error instanceof MediaRouteError) return sendError(res, 400, error.message, error.code);
+      throw error;
+    }
   }
 
   const server = createServer((req, res) => {

@@ -21,14 +21,15 @@ if [[ -e "$OUT" && -n "$(ls -A "$OUT" 2>/dev/null)" ]]; then
   exit 2
 fi
 
-mkdir -p "$OUT/api/ai-gateway-service" "$OUT/database/migrations"
+mkdir -p "$OUT/api/ai-gateway-service" "$OUT/database/migrations" "$OUT/platform"
 for file in Dockerfile entrypoint.sh package.json package-lock.json main.ts service.ts store.ts; do
   cp "$SERVICE_DIR/$file" "$OUT/api/ai-gateway-service/$file"
 done
-for module in ai_gateway ai_budget ai_rate_limit auth; do
+for module in ai_gateway ai_budget ai_rate_limit auth media_router; do
   cp "$INFRA_DIR/api/$module.ts" "$OUT/api/$module.ts"
 done
 cp "$INFRA_DIR/database/migrations/025_ai_run_telemetry.sql" "$OUT/database/migrations/"
+cp "$INFRA_DIR/platform/media-transcription-routing.json" "$OUT/platform/"
 cp "$SERVICE_DIR/railway.json" "$OUT/railway.json"
 # Railway `up --path-as-root` falls back to Railpack unless a Dockerfile sits at the
 # context root, so place the (context-root-relative) Dockerfile there as well.
