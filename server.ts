@@ -1,6 +1,8 @@
 import { createServer } from 'http';
 import { execFile } from 'child_process';
 import { getDb, initDb, closeDb } from '../mcp-server/src/db.js';
+import { openCellStore } from '../mcp-server/src/cell-store.js';
+import { sortRows, withCategory } from '../mcp-server/src/portfolio-reads.js';
 import { fileURLToPath, URL } from 'url';
 import { promisify } from 'util';
 import { join } from 'path';
@@ -759,36 +761,33 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       const category = url.searchParams.get('category');
       const status = url.searchParams.get('status');
 
-      let query = `
-        SELECT s.name, s.slug, s.description, s.level, s.status, s.progress_percent,
-               sc.name as category_name, sc.slug as category_slug, sc.icon, sc.color
-        FROM skills s
-        LEFT JOIN skill_categories sc ON s.category_id = sc.id
-        WHERE 1=1
-      `;
-      const args: any[] = [];
-
-      if (category) { query += ' AND sc.slug = ?'; args.push(category); }
-      if (status) { query += ' AND s.status = ?'; args.push(status); }
-
-      query += ' ORDER BY s.priority ASC, s.progress_percent DESC';
-
-      const skills = db.prepare(query).all(...args);
+      // Skills live in the roles-skills cell.
+      const rolesSkills = openCellStore('roles-skills', 'dashboard-api', { channel: 'api' });
+      const filters: Record<string, string> = {};
+      if (status) filters.status = status;
+      let joined = withCategory(await rolesSkills.list('skills', filters), await rolesSkills.list('skill-categories'));
+      if (category) joined = joined.filter((s) => s.category_slug === category);
+      const skills = sortRows(joined, ['priority'], ['progress_percent', 'desc']).map((s) => ({
+        name: s.name, slug: s.slug, description: s.description, level: s.level, status: s.status,
+        progress_percent: s.progress_percent, category_name: s.category_name, category_slug: s.category_slug,
+        icon: s.category_icon, color: s.category_color,
+      }));
       return sendJson(res, { skills }, 200, req);
     }
 
     // GET /api/skills/:slug - ดึง skill เดียว
     if (path.match(/^\/api\/skills\/[\w-]+$/) && method === 'GET') {
       const slug = path.split('/').pop();
-      const skill = db.prepare(`
-        SELECT s.id, s.name, s.slug, s.description, s.level, s.target_level,
-               s.status, s.progress_percent, s.hours_invested,
-               s.started_at, s.target_completion_date, s.last_practiced,
-               sc.name as category_name, sc.slug as category_slug
-        FROM skills s
-        LEFT JOIN skill_categories sc ON s.category_id = sc.id
-        WHERE s.slug = ?
-      `).get(slug);
+      const rolesSkills = openCellStore('roles-skills', 'dashboard-api', { channel: 'api' });
+      const found = (await rolesSkills.list('skills')).find((s) => s.slug === slug);
+      const category = found?.category_id == null ? null : await rolesSkills.get('skill-categories', found.category_id);
+      const skill = found && {
+        id: found.id, name: found.name, slug: found.slug, description: found.description, level: found.level,
+        target_level: found.target_level, status: found.status, progress_percent: found.progress_percent,
+        hours_invested: found.hours_invested, started_at: found.started_at,
+        target_completion_date: found.target_completion_date, last_practiced: found.last_practiced,
+        category_name: category?.name ?? null, category_slug: category?.slug ?? null,
+      };
 
       if (!skill) return sendJson(res, { error: 'Not found' }, 404, req);
       return sendJson(res, { skill }, 200, req);
