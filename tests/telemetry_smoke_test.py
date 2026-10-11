@@ -139,7 +139,7 @@ def run() -> bool:
     # Each part gets its own temp dir so bootstrap backups written by one part
     # never make the next part's fresh DB look like a data-loss replacement.
     part1_dir = tempfile.TemporaryDirectory(prefix="solo-empire-otel-1-")
-    db_path = str(Path(part1_dir.name) / "solo-empire.db")
+    db_path = str(Path(part1_dir.name) / "telemetry.db")
     port = find_free_port()
     try:
         proc = start_server(port, db_path, {})
@@ -164,7 +164,7 @@ def run() -> bool:
     CapturingOtlpHandler.received.clear()
 
     part2_dir = tempfile.TemporaryDirectory(prefix="solo-empire-otel-2-")
-    db_path = str(Path(part2_dir.name) / "solo-empire.db")
+    db_path = str(Path(part2_dir.name) / "telemetry.db")
     port = find_free_port()
     try:
         proc = start_server(
