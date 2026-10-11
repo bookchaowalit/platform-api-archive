@@ -811,35 +811,12 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       return sendJson(res, { assets }, 200, req);
     }
 
-    // GET /api/content - ดึง content ที่ published แล้ว
+    // GET /api/content, /api/content/:slug - retired: content lives in the solo-content cell
     if (path === '/api/content' && method === 'GET') {
-      const type = url.searchParams.get('type');
-      const rawLimit = url.searchParams.get('limit');
-      const limit = rawLimit === null ? 20 : Number(rawLimit);
-
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-        return sendJson(res, { error: 'limit must be an integer between 1 and 100' }, 400, req);
-      }
-
-      let query = 'SELECT id, title, slug, content_type, summary, status, published_at, platforms, canonical_url, views, shares FROM content WHERE status = ?';
-      const args: any[] = ['published'];
-
-      if (type) { query += ' AND content_type = ?'; args.push(type); }
-
-      query += ' ORDER BY published_at DESC LIMIT ?';
-      args.push(limit);
-
-      const content = db.prepare(query).all(...args);
-      return sendJson(res, { content }, 200, req);
+      return sendJson(res, { error: 'Gone: content moved to the solo-content cell' }, 410, req);
     }
-
-    // GET /api/content/:slug - ดึง content เดียว
     if (path.match(/^\/api\/content\/[\w-]+$/) && method === 'GET') {
-      const slug = path.split('/').pop();
-      const item = db.prepare('SELECT id, title, slug, content_type, summary, body_html, status, published_at, platforms, canonical_url, views, shares FROM content WHERE slug = ? AND status = ?').get(slug, 'published');
-
-      if (!item) return sendJson(res, { error: 'Not found' }, 404, req);
-      return sendJson(res, { content: item }, 200, req);
+      return sendJson(res, { error: 'Gone: content moved to the solo-content cell' }, 410, req);
     }
 
     // GET /api/platform/building-blocks - which central gateway, SDK, edge rule,
@@ -1427,49 +1404,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       return sendJson(res, { success: true, links: updated }, 200, req);
     }
 
-    // POST /api/sync/content - อัพเดท content สำหรับ publish หลายที่
+    // POST /api/sync/content - retired: content lives in the solo-content cell
     if (path === '/api/sync/content' && method === 'POST') {
-      const body = await parseBody(req);
-
-      if (!body.title && !body.slug) {
-        return sendJson(res, { error: 'Missing required fields: title or slug' }, 400, req);
-      }
-
-      // Allowlist: only these fields can be updated
-      const ALLOWED_FIELDS = ['title', 'slug', 'content_type', 'summary', 'body', 'body_html', 'status', 'published_at', 'platforms', 'canonical_url', 'views', 'shares', 'leads_generated', 'meta_title', 'meta_description', 'keywords', 'related_skill_ids', 'related_niche_id', 'notes'];
-      const filteredBody = Object.fromEntries(
-        Object.entries(body).filter(([k]) => ALLOWED_FIELDS.includes(k))
-      );
-
-      const existing = body.slug
-        ? db.prepare('SELECT id FROM content WHERE slug = ?').get(body.slug) as any
-        : null;
-
-      if (existing && Object.keys(filteredBody).length > 0) {
-        const fields = Object.entries(filteredBody)
-          .map(([k]) => `${k} = ?`)
-          .join(', ');
-
-        const values = Object.values(filteredBody);
-
-        db.prepare(`UPDATE content SET ${fields}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-          .run(...values, existing.id);
-      } else if (!existing && Object.keys(filteredBody).length > 0) {
-        const columns = Object.keys(filteredBody).join(', ');
-        const placeholders = Object.keys(filteredBody).map(() => '?').join(', ');
-        const values = Object.values(filteredBody);
-
-        db.prepare(`INSERT INTO content (${columns}) VALUES (${placeholders})`)
-          .run(...values);
-      }
-
-      // Log sync
-      db.prepare(`
-        INSERT INTO sync_log (entity_type, target_system, status, data_synced)
-        VALUES ('content', ?, 'success', ?)
-      `).run(body.platforms || 'api', JSON.stringify(filteredBody));
-
-      return sendJson(res, { success: true }, 200, req);
+      return sendJson(res, { error: 'Gone: content moved to the solo-content cell' }, 410, req);
     }
 
     // =====================================================
