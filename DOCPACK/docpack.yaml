@@ -1,0 +1,8 @@
+system_id: bookchaowalit/private/solo-platform-api
+prefix: CARD
+brand: "SOLO PLATFORM API (ARCHIVE)"
+subtitle: "สำเนาเก็บถาวรของ REST server เดิมใน solo-empire `infra/api/`"
+footer: "solo-platform-api — Product Card"
+color: "#555555"
+audience: internal
+tier: L0
