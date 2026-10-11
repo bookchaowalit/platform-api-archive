@@ -1,6 +1,5 @@
 import { createServer } from 'http';
 import { execFile } from 'child_process';
-import { getDb, initDb, closeDb } from '../mcp-server/src/db.js';
 import { openCellStore } from '../mcp-server/src/cell-store.js';
 import { sortRows, withCategory } from '../mcp-server/src/portfolio-reads.js';
 import { fileURLToPath, URL } from 'url';
@@ -13,8 +12,6 @@ import { invoicePreview, taxQuote } from './platform/thai_tax.js';
 import { presignFile, r2ConfigFromEnv } from './platform/files.js';
 import { sendEmail } from './platform/email.js';
 import { identityConfigFromEnv, verifySessionRequest, type IdentityConfig } from './platform/identity.js';
-import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
-import { verifyStripeSignature } from './stripe.js';
 import { startTelemetry, withRequestSpan } from './telemetry.js';
 import { authConfigurationError, authConfigurationPresent, requireAuth, type AuthResult } from './auth.js';
 
@@ -540,8 +537,6 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     return;
   }
 
-  const db = await getDb();
-
   try {
     // /api/ai/* - retired: generation, spend, budget and telemetry live in solo-ai-gateway
     if (path === '/api/ai/status' && method === 'GET') {
@@ -564,11 +559,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // PUBLIC API: สำหรับ landing page ดึงข้อมูลไปแสดง
     // =====================================================
 
-    // GET /api/profile - ดึงข้อมูล profile
+    // GET /api/profile - retired: the local profile and social_links tables are gone
     if (path === '/api/profile' && method === 'GET') {
-      const profile = db.prepare('SELECT id, name, title, bio, tagline, location, website, avatar_url, header_image_url FROM profile LIMIT 1').get();
-      const socialLinks = db.prepare('SELECT id, platform, url, username, display_name, description, is_primary FROM social_links WHERE is_active = 1 ORDER BY sort_order').all();
-      return sendJson(res, { profile, socialLinks }, 200, req);
+      return sendJson(res, { error: 'Gone: the local profile and social links were retired with the SQLite database' }, 410, req);
     }
 
     // GET /api/skills - ดึง skills สำหรับแสดงใน portfolio
@@ -960,134 +953,6 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       return sendJson(res, boards, 200, req);
     }
 
-    // POST /api/webhook/line - LINE signs this public ingress instead of using
-    // the internal Bearer token. The raw body must be verified before parsing.
-    if (path === '/api/webhook/line' && method === 'POST') {
-      const rawBody = await parseRawBody(req);
-      const channelSecret = process.env.LINE_SOLO_EMPIRE_WEBHOOK_SECRET;
-      const signature = typeof req.headers['x-line-signature'] === 'string'
-        ? req.headers['x-line-signature']
-        : undefined;
-
-      if (!channelSecret) {
-        return sendJson(res, { error: 'LINE webhook is not configured' }, 503, req);
-      }
-      if (!verifyLineSignature(rawBody, signature, channelSecret)) {
-        return sendJson(res, { error: 'Invalid LINE webhook signature' }, 401, req);
-      }
-
-      let body: any;
-      try {
-        body = JSON.parse(rawBody.toString('utf8'));
-      } catch {
-        return sendJson(res, { error: 'Request body must be valid JSON' }, 400, req);
-      }
-
-      if (!body || !Array.isArray(body.events)) {
-        return sendJson(res, { error: 'LINE webhook body must include an events array' }, 400, req);
-      }
-
-      const events = body.events.filter((event: any): event is LineWebhookEvent => (
-        event && typeof event === 'object' && typeof event.type === 'string'
-      ));
-      if (events.length !== body.events.length) {
-        return sendJson(res, { error: 'Each LINE webhook event must include a type' }, 400, req);
-      }
-
-      let acceptedEvents = 0;
-      let duplicateEvents = 0;
-      const insertEvent = db.prepare(`
-        INSERT INTO webhook_log (source, event_type, external_id, payload, processed)
-        VALUES ('line', ?, ?, ?, 0)
-      `);
-      const findExisting = db.prepare(
-        "SELECT id FROM webhook_log WHERE source = 'line' AND external_id = ? LIMIT 1",
-      );
-
-      db.transaction(() => {
-        for (const event of events) {
-          const externalId = getLineEventExternalId(event);
-          if (externalId && findExisting.get(externalId)) {
-            duplicateEvents += 1;
-            continue;
-          }
-
-          insertEvent.run(
-            event.type,
-            externalId,
-            JSON.stringify({ destination: body.destination || null, event }),
-          );
-          acceptedEvents += 1;
-        }
-      })();
-
-      return sendJson(res, {
-        success: true,
-        source: 'line',
-        received_events: events.length,
-        accepted_events: acceptedEvents,
-        duplicate_events: duplicateEvents,
-        processing: 'queued',
-      }, 200, req);
-    }
-
-    // POST /api/webhook/stripe - signed Stripe ingress only. Payment events
-    // remain pending in webhook_log; this route never creates charges/refunds.
-    if (path === '/api/webhook/stripe' && method === 'POST') {
-      const rawBody = await parseRawBody(req);
-      const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-      const signature = typeof req.headers['stripe-signature'] === 'string'
-        ? req.headers['stripe-signature']
-        : undefined;
-
-      if (!endpointSecret) {
-        return sendJson(res, { error: 'Stripe webhook is not configured' }, 503, req);
-      }
-      const verification = verifyStripeSignature(rawBody, signature, endpointSecret);
-      if (!verification.valid) {
-        return sendJson(res, { error: 'Invalid Stripe webhook signature' }, 400, req);
-      }
-
-      let body: any;
-      try {
-        body = JSON.parse(rawBody.toString('utf8'));
-      } catch {
-        return sendJson(res, { error: 'Request body must be valid JSON' }, 400, req);
-      }
-
-      if (!body || typeof body.id !== 'string' || !body.id.trim() || typeof body.type !== 'string' || !body.type.trim()) {
-        return sendJson(res, { error: 'Stripe event must include id and type' }, 400, req);
-      }
-
-      const existing = db.prepare(
-        "SELECT id FROM webhook_log WHERE source = 'stripe' AND external_id = ? LIMIT 1",
-      ).get(body.id.trim());
-      if (existing) {
-        return sendJson(res, {
-          success: true,
-          source: 'stripe',
-          received: true,
-          accepted_events: 0,
-          duplicate_events: 1,
-          processing: 'queued',
-        }, 200, req);
-      }
-
-      db.prepare(`
-        INSERT INTO webhook_log (source, event_type, external_id, payload, processed)
-        VALUES ('stripe', ?, ?, ?, 0)
-      `).run(body.type.trim(), body.id.trim(), rawBody.toString('utf8'));
-
-      return sendJson(res, {
-        success: true,
-        source: 'stripe',
-        received: true,
-        accepted_events: 1,
-        duplicate_events: 0,
-        processing: 'queued',
-      }, 200, req);
-    }
-
     // =====================================================
     // SYNC API: สำหรับอัพเดทข้อมูลจากที่เดียวไปหลายเว็บ
     // Requires Bearer token when API_TOKEN is set
@@ -1101,109 +966,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       }
     }
 
-    // POST /api/sync/profile - อัพเดท profile + log sync
-    if (path === '/api/sync/profile' && method === 'POST') {
-      const body = await parseBody(req);
-
-      // Allowlist: only these fields can be updated
-      const ALLOWED_FIELDS = ['name', 'title', 'bio', 'tagline', 'location', 'email', 'website', 'avatar_url', 'header_image_url'];
-      const filteredBody = Object.fromEntries(
-        Object.entries(body).filter(([k]) => ALLOWED_FIELDS.includes(k))
-      );
-
-      const existing = db.prepare('SELECT id FROM profile LIMIT 1').get() as any;
-
-      if (existing && Object.keys(filteredBody).length > 0) {
-        const fields = Object.entries(filteredBody)
-          .map(([k, v]) => `${k} = ?`)
-          .join(', ');
-
-        const values = Object.values(filteredBody);
-
-        db.prepare(`UPDATE profile SET ${fields}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-          .run(...values, existing.id);
-      } else if (!existing && Object.keys(filteredBody).length > 0) {
-        const columns = Object.keys(filteredBody).join(', ');
-        const placeholders = Object.keys(filteredBody).map(() => '?').join(', ');
-        const values = Object.values(filteredBody);
-
-        db.prepare(`INSERT INTO profile (${columns}) VALUES (${placeholders})`)
-          .run(...values);
-      }
-
-      // Log sync
-      db.prepare(`
-        INSERT INTO sync_log (entity_type, entity_id, target_system, status, data_synced)
-        VALUES ('profile', 1, 'api', 'success', ?)
-      `).run(JSON.stringify(filteredBody));
-
-      const updated = db.prepare('SELECT * FROM profile LIMIT 1').get();
-      return sendJson(res, { success: true, profile: updated }, 200, req);
-    }
-
-    // POST /api/sync/social-links - อัพเดท social links ทั้งหมด
-    if (path === '/api/sync/social-links' && method === 'POST') {
-      const body = await parseBody(req);
-      const { links } = body;
-
-      if (!Array.isArray(links)) {
-        return sendJson(res, { error: 'links must be an array' }, 400, req);
-      }
-
-      if (links.length > 50) {
-        return sendJson(res, { error: 'Too many links (max 50)' }, 400, req);
-      }
-
-      // Validate each link
-      for (let i = 0; i < links.length; i++) {
-        const link = links[i];
-        if (!link.platform || typeof link.platform !== 'string') {
-          return sendJson(res, { error: `Link ${i}: platform is required and must be a string` }, 400, req);
-        }
-        if (!link.url || typeof link.url !== 'string') {
-          return sendJson(res, { error: `Link ${i}: url is required and must be a string` }, 400, req);
-        }
-        if (!isValidUrl(link.url)) {
-          return sendJson(res, { error: `Link ${i}: invalid URL format: ${link.url}` }, 400, req);
-        }
-      }
-
-      const transaction = db.transaction((links: any[]) => {
-        // Deactivate all first
-        db.prepare('UPDATE social_links SET is_active = 0').run();
-
-        // Upsert each link
-        for (const link of links) {
-          const existing = db.prepare('SELECT id FROM social_links WHERE platform = ?').get(link.platform) as any;
-
-          if (existing) {
-            db.prepare(`
-              UPDATE social_links
-              SET url = ?, username = ?, display_name = ?, description = ?,
-                  is_primary = ?, sort_order = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
-              WHERE id = ?
-            `).run(link.url, link.username || null, link.display_name || null,
-                   link.description || null, link.is_primary ? 1 : 0, link.sort_order || 0, existing.id);
-          } else {
-            db.prepare(`
-              INSERT INTO social_links (platform, url, username, display_name, description, is_primary, sort_order, is_active)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-            `).run(link.platform, link.url, link.username || null, link.display_name || null,
-                   link.description || null, link.is_primary ? 1 : 0, link.sort_order || 0);
-          }
-        }
-      });
-
-      transaction(links);
-
-      // Log sync
-      db.prepare(`
-        INSERT INTO sync_log (entity_type, target_system, status, data_synced)
-        VALUES ('social_links', 'api', 'success', ?)
-      `).run(JSON.stringify(body));
-
-      const updated = db.prepare('SELECT * FROM social_links WHERE is_active = 1 ORDER BY sort_order').all();
-      return sendJson(res, { success: true, links: updated }, 200, req);
+    // POST /api/sync/profile, /api/sync/social-links - retired: the local profile, social_links and sync_log tables are gone
+    if ((path === '/api/sync/profile' || path === '/api/sync/social-links') && method === 'POST') {
+      return sendJson(res, { error: 'Gone: the local profile and social links were retired with the SQLite database' }, 410, req);
     }
 
     // POST /api/sync/content - retired: content lives in the solo-content cell
@@ -1214,6 +979,11 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // =====================================================
     // WEBHOOK API: สำหรับรับข้อมูลจาก external services
     // =====================================================
+
+    // POST /api/webhook/line, /api/webhook/stripe - retired: the local webhook_log queue is gone
+    if ((path === '/api/webhook/line' || path === '/api/webhook/stripe') && method === 'POST') {
+      return sendJson(res, { error: 'Gone: the local webhook log was retired with the SQLite database' }, 410, req);
+    }
 
     // POST /api/webhook/analytics, /api/webhook/revenue - retired: assets and revenue live in the CRM
     if ((path === '/api/webhook/analytics' || path === '/api/webhook/revenue') && method === 'POST') {
@@ -1260,8 +1030,6 @@ async function startServer() {
     process.exit(1);
   }
 
-  await initDb();
-
   const server = createServer(handleRequest);
   server.listen(PORT, API_HOST, () => {
     console.log(`Solo Empire API running on http://${API_HOST}:${PORT}`);
@@ -1291,11 +1059,9 @@ async function startServer() {
 startServer();
 
 process.on('SIGINT', () => {
-  closeDb();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  closeDb();
   process.exit(0);
 });
