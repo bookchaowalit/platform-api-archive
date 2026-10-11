@@ -15,9 +15,6 @@ import { sendEmail } from './platform/email.js';
 import { identityConfigFromEnv, verifySessionRequest, type IdentityConfig } from './platform/identity.js';
 import { getLineEventExternalId, verifyLineSignature, type LineWebhookEvent } from './line.js';
 import { verifyStripeSignature } from './stripe.js';
-import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent } from './ai_gateway.js';
-import { AiBudgetError, createAiBudgetGuard, getAiBudgetStatus } from './ai_budget.js';
-import { aiRateLimitHeaders, createAiRateLimiter } from './ai_rate_limit.js';
 import { startTelemetry, withRequestSpan } from './telemetry.js';
 import { authConfigurationError, authConfigurationPresent, requireAuth, type AuthResult } from './auth.js';
 
@@ -29,7 +26,6 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 const API_HOST = process.env.API_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 const API_TOKEN = process.env.API_TOKEN || '';  // Bearer token for write routes
 const MAX_BODY_SIZE = parseInt(process.env.MAX_BODY_SIZE || '1048576'); // 1MB default
-const AI_RATE_LIMITER = createAiRateLimiter(process.env);
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const PYTHON_WRAPPER = join(REPO_ROOT, 'infra', 'scripts', 'setup', 'run-python3.sh');
@@ -164,45 +160,6 @@ function sendAuthFailure(res: any, req: any, auth: AuthResult) {
     { error: status === 403 ? 'Forbidden' : 'Unauthorized', message: auth.error },
     status,
     req,
-  );
-}
-
-function recordAiTelemetry(db: any, event: AiTelemetryEvent): void {
-  db.prepare(`
-    INSERT INTO ai_run_telemetry
-      (run_id, route, prompt_version, provider, model, input_tokens,
-       output_tokens, total_tokens, token_budget, latency_ms,
-       estimated_cost_usd, cache_hit, status, metadata_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(run_id) DO UPDATE SET
-      route=excluded.route,
-      prompt_version=excluded.prompt_version,
-      provider=excluded.provider,
-      model=excluded.model,
-      input_tokens=excluded.input_tokens,
-      output_tokens=excluded.output_tokens,
-      total_tokens=excluded.total_tokens,
-      token_budget=excluded.token_budget,
-      latency_ms=excluded.latency_ms,
-      estimated_cost_usd=excluded.estimated_cost_usd,
-      cache_hit=excluded.cache_hit,
-      status=excluded.status,
-      metadata_json=excluded.metadata_json
-  `).run(
-    event.run_id,
-    event.route,
-    event.prompt_version,
-    event.provider,
-    event.model,
-    event.input_tokens,
-    event.output_tokens,
-    event.total_tokens,
-    event.token_budget,
-    event.latency_ms,
-    event.estimated_cost_usd,
-    event.cache_hit ? 1 : 0,
-    event.status,
-    JSON.stringify(event.metadata),
   );
 }
 
@@ -586,63 +543,16 @@ async function handleRequestInner(req: any, res: any, url: URL) {
   const db = await getDb();
 
   try {
-    // Central AI Gateway: all hosted generation is authenticated, bounded,
-    // provider-neutral, and opt-in. Prompt/response bodies never enter telemetry.
+    // /api/ai/* - retired: generation, spend, budget and telemetry live in solo-ai-gateway
     if (path === '/api/ai/status' && method === 'GET') {
-      const auth = requireAuth(req, 'api:read');
-      if (!auth.authorized) {
-        return sendAuthFailure(res, req, auth);
-      }
-      return sendJson(
-        res,
-        { ...getAiGatewayStatus(), budget: getAiBudgetStatus(db), rate_limit: AI_RATE_LIMITER.status() },
-        200,
-        req,
-      );
+      return sendJson(res, { error: 'Gone: AI generation moved to solo-ai-gateway' }, 410, req);
     }
-
     if (path === '/api/ai/generate' && method === 'POST') {
       const auth = requireAuth(req, 'ai:generate');
       if (!auth.authorized) {
         return sendAuthFailure(res, req, auth);
       }
-      const body = await parseBody(req);
-      const rateLimit = AI_RATE_LIMITER.acquire(auth.subject || 'anonymous');
-      if (!rateLimit.allowed) {
-        const status = rateLimit.reason === 'configuration_error' ? 503 : 429;
-        return sendJson(
-          res,
-          {
-            error: status === 429 ? 'Too Many Requests' : 'AI gateway rate limiter is unavailable',
-            code: rateLimit.reason,
-            retry_after_seconds: rateLimit.retryAfterSeconds,
-          },
-          status,
-          req,
-          undefined,
-          aiRateLimitHeaders(rateLimit),
-        );
-      }
-      try {
-        const result = await generateAi(body, process.env, {
-          budgetGuard: createAiBudgetGuard(db),
-          recordTelemetry: (event) => recordAiTelemetry(db, event),
-        });
-        return sendJson(res, result.response, 200, req);
-      } catch (error) {
-        if (error instanceof AiGatewayError && error.telemetry && (error.telemetry.estimated_cost_usd === 0 || error.telemetry.provider === null)) {
-          recordAiTelemetry(db, error.telemetry);
-        }
-        if (error instanceof AiGatewayError) {
-          throw new HttpError(error.status, error.message);
-        }
-        if (error instanceof AiBudgetError) {
-          throw new HttpError(503, 'AI monthly budget guard is unavailable');
-        }
-        throw error;
-      } finally {
-        rateLimit.release();
-      }
+      return sendJson(res, { error: 'Gone: AI generation moved to solo-ai-gateway' }, 410, req);
     }
 
     // /api/finance/v1 - retired: the finance control-plane tables left for the CRM ledger
@@ -1347,10 +1257,6 @@ async function startServer() {
   if (process.env.NODE_ENV === 'production' && !authConfigurationPresent()) {
     console.error('ERROR: API_TOKEN or API_TOKENS_JSON is required in production mode');
     console.error('Set a legacy API_TOKEN or provision scoped token hashes before starting production');
-    process.exit(1);
-  }
-  if (process.env.NODE_ENV === 'production' && AI_RATE_LIMITER.status().configuration_error) {
-    console.error('ERROR: AI gateway rate-limit configuration is invalid in production mode');
     process.exit(1);
   }
 
