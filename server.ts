@@ -19,14 +19,7 @@ import { AiGatewayError, generateAi, getAiGatewayStatus, type AiTelemetryEvent }
 import { AiBudgetError, createAiBudgetGuard, getAiBudgetStatus } from './ai_budget.js';
 import { aiRateLimitHeaders, createAiRateLimiter } from './ai_rate_limit.js';
 import { startTelemetry, withRequestSpan } from './telemetry.js';
-import { financeApiResponse } from './finance.js';
-import { newFinanceApiRequestId, recordFinanceApiAudit } from './audit.js';
 import { authConfigurationError, authConfigurationPresent, requireAuth, type AuthResult } from './auth.js';
-import {
-  consumeFinanceRateLimit,
-  financeRateLimitConfigurationError,
-  financeRateLimitHeaders,
-} from './rate_limit.js';
 
 startTelemetry();
 
@@ -652,97 +645,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       }
     }
 
-    // BookFinance API v1: authenticated read-only facade over the finance
-    // control-plane tables. Frontends consume this boundary; scrapers and
-    // data products must not write to it or access SQLite directly.
-    if (path === '/api/finance/v1' || path.startsWith('/api/finance/v1/')) {
-      const requestId = newFinanceApiRequestId();
-      const auth = requireAuth(req, 'finance:read');
-      const rateLimit = consumeFinanceRateLimit(auth.subject || 'anonymous');
-      const rateLimitHeaders = financeRateLimitHeaders(rateLimit);
-      if (!rateLimit.allowed) {
-        recordFinanceApiAudit(db, requestId, {
-          method,
-          route: path,
-          status: 429,
-          authorized: auth.authorized,
-          subject: auth.subject,
-          scopes: auth.scopes,
-          requiredScope: 'finance:read',
-          queryKeys: [...url.searchParams.keys()],
-        });
-        return sendJson(
-          res,
-          {
-            error: 'Too Many Requests',
-            schema_version: 'finance.v1',
-            retry_after_seconds: rateLimit.retryAfterSeconds,
-          },
-          429,
-          req,
-          requestId,
-          rateLimitHeaders,
-        );
-      }
-      if (!auth.authorized) {
-        recordFinanceApiAudit(db, requestId, {
-          method,
-          route: path,
-          status: auth.status || 401,
-          authorized: false,
-          subject: auth.subject,
-          scopes: auth.scopes,
-          requiredScope: 'finance:read',
-          queryKeys: [...url.searchParams.keys()],
-        });
-        return sendJson(
-          res,
-          { error: auth.status === 403 ? 'Forbidden' : 'Unauthorized', message: auth.error },
-          auth.status || 401,
-          req,
-          requestId,
-          rateLimitHeaders,
-        );
-      }
-      try {
-        const result = financeApiResponse(db, url, method);
-        if (!result) {
-          recordFinanceApiAudit(db, requestId, {
-            method,
-            route: path,
-            status: 404,
-            authorized: true,
-            subject: auth.subject,
-            scopes: auth.scopes,
-            requiredScope: 'finance:read',
-            queryKeys: [...url.searchParams.keys()],
-          });
-          return sendJson(res, { error: 'BookFinance API route not found' }, 404, req, requestId, rateLimitHeaders);
-        }
-        recordFinanceApiAudit(db, requestId, {
-          method,
-          route: path,
-          status: result.status,
-          authorized: true,
-          subject: auth.subject,
-          scopes: auth.scopes,
-          requiredScope: 'finance:read',
-          queryKeys: [...url.searchParams.keys()],
-        });
-        return sendJson(res, result.body, result.status, req, requestId, rateLimitHeaders);
-      } catch (error) {
-        recordFinanceApiAudit(db, requestId, {
-          method,
-          route: path,
-          status: 500,
-          authorized: true,
-          subject: auth.subject,
-          scopes: auth.scopes,
-          requiredScope: 'finance:read',
-          queryKeys: [...url.searchParams.keys()],
-        });
-        throw error;
-      }
+    // /api/finance/v1 - retired: the finance control-plane tables left for the CRM ledger
+    if ((path === '/api/finance/v1' || path.startsWith('/api/finance/v1/')) && method === 'GET') {
+      return sendJson(res, { error: 'Gone: finance moved to the CRM ledger' }, 410, req);
     }
 
     // =====================================================
@@ -793,22 +698,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       return sendJson(res, { skill }, 200, req);
     }
 
-    // GET /api/assets - ดึง assets สำหรับแสดง
+    // GET /api/assets - retired: the assets tables left for the CRM
     if (path === '/api/assets' && method === 'GET') {
-      const type = url.searchParams.get('type');
-      const status = url.searchParams.get('status');
-
-      // Public assets are limited to launched/maintained records. Financial
-      // valuation and revenue columns remain internal to the control plane.
-      let query = "SELECT id, name, type, description, url, platform, status, views, subscribers FROM assets WHERE status IN ('active', 'maintenance')";
-      const args: any[] = [];
-
-      if (type) { query += ' AND type = ?'; args.push(type); }
-      if (status) { query += ' AND status = ?'; args.push(status); }
-
-      query += ' ORDER BY created_at DESC';
-      const assets = db.prepare(query).all(...args);
-      return sendJson(res, { assets }, 200, req);
+      return sendJson(res, { error: 'Gone: assets moved to the CRM' }, 410, req);
     }
 
     // GET /api/content, /api/content/:slug - retired: content lives in the solo-content cell
@@ -1413,122 +1305,9 @@ async function handleRequestInner(req: any, res: any, url: URL) {
     // WEBHOOK API: สำหรับรับข้อมูลจาก external services
     // =====================================================
 
-    // POST /api/webhook/analytics - รับ analytics data
-    if (path === '/api/webhook/analytics' && method === 'POST') {
-      const body = await parseBody(req);
-      const { asset_id, metric_date, views, subscribers, revenue, engagement_rate } = body;
-      const assetId = Number(asset_id);
-
-      if (!Number.isInteger(assetId) || assetId <= 0 || !metric_date) {
-        return sendJson(res, { error: 'Missing required fields: asset_id, metric_date' }, 400, req);
-      }
-
-      if (typeof metric_date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(metric_date)) {
-        return sendJson(res, { error: 'metric_date must use YYYY-MM-DD format' }, 400, req);
-      }
-
-      const asset = db.prepare('SELECT id FROM assets WHERE id = ?').get(assetId);
-      if (!asset) {
-        return sendJson(res, { error: 'Asset not found' }, 404, req);
-      }
-
-      // Validate numeric ranges
-      if (views !== undefined && (typeof views !== 'number' || !Number.isFinite(views) || views < 0 || views > 1e9)) {
-        return sendJson(res, { error: 'views must be a number between 0 and 1,000,000,000' }, 400, req);
-      }
-      if (subscribers !== undefined && (typeof subscribers !== 'number' || !Number.isFinite(subscribers) || subscribers < 0 || subscribers > 1e9)) {
-        return sendJson(res, { error: 'subscribers must be a number between 0 and 1,000,000,000' }, 400, req);
-      }
-      if (revenue !== undefined && (typeof revenue !== 'number' || !Number.isFinite(revenue) || revenue < 0 || revenue > 1e9)) {
-        return sendJson(res, { error: 'revenue must be a number between 0 and 1,000,000,000' }, 400, req);
-      }
-      if (engagement_rate !== undefined && (typeof engagement_rate !== 'number' || !Number.isFinite(engagement_rate) || engagement_rate < 0 || engagement_rate > 100)) {
-        return sendJson(res, { error: 'engagement_rate must be a number between 0 and 100' }, 400, req);
-      }
-
-      const previous = db.prepare(`
-        SELECT views, subscribers, revenue, engagement_rate
-        FROM asset_metrics WHERE asset_id = ? AND metric_date = ?
-      `).get(assetId, metric_date) as any;
-      const nextViews = views ?? 0;
-      const nextSubscribers = subscribers ?? 0;
-      const nextRevenue = revenue ?? 0;
-      const nextEngagementRate = engagement_rate ?? previous?.engagement_rate ?? null;
-
-      const updateMetrics = db.prepare(`
-        INSERT INTO asset_metrics (asset_id, metric_date, views, subscribers, revenue, engagement_rate)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(asset_id, metric_date) DO UPDATE SET
-          views = excluded.views,
-          subscribers = excluded.subscribers,
-          revenue = excluded.revenue,
-          engagement_rate = excluded.engagement_rate
-      `);
-      const updateTotals = db.prepare(`
-        UPDATE assets SET
-          views = COALESCE(views, 0) + ?,
-          subscribers = COALESCE(subscribers, 0) + ?,
-          revenue = COALESCE(revenue, 0) + ?,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `);
-
-      db.transaction(() => {
-        updateMetrics.run(assetId, metric_date, nextViews, nextSubscribers, nextRevenue, nextEngagementRate);
-        updateTotals.run(
-          nextViews - (previous?.views ?? 0),
-          nextSubscribers - (previous?.subscribers ?? 0),
-          nextRevenue - (previous?.revenue ?? 0),
-          assetId,
-        );
-      })();
-
-      return sendJson(res, { success: true, updated: Boolean(previous) }, 200, req);
-    }
-
-    // POST /api/webhook/revenue - รับ revenue data
-    if (path === '/api/webhook/revenue' && method === 'POST') {
-      const body = await parseBody(req);
-      const idempotencyKey = typeof req.headers['idempotency-key'] === 'string'
-        ? req.headers['idempotency-key'].trim()
-        : '';
-
-      if (!body.source_type || !body.source_name || !body.amount || !body.revenue_date) {
-        return sendJson(res, { error: 'Missing required fields: source_type, source_name, amount, revenue_date' }, 400, req);
-      }
-
-      if (!idempotencyKey || idempotencyKey.length > 255) {
-        return sendJson(res, { error: 'Idempotency-Key header is required and must be at most 255 characters' }, 400, req);
-      }
-
-      if (typeof body.revenue_date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(body.revenue_date)) {
-        return sendJson(res, { error: 'revenue_date must use YYYY-MM-DD format' }, 400, req);
-      }
-
-      // Validate amount is a positive number
-      if (typeof body.amount !== 'number' || !Number.isFinite(body.amount) || body.amount <= 0 || body.amount > 1e9) {
-        return sendJson(res, { error: 'amount must be a positive number up to 1,000,000,000' }, 400, req);
-      }
-
-      // Validate source_type is one of the allowed values
-      const VALID_SOURCE_TYPES = ['service', 'product', 'subscription', 'affiliate', 'ad', 'sponsorship', 'other'];
-      if (!VALID_SOURCE_TYPES.includes(body.source_type)) {
-        return sendJson(res, { error: `source_type must be one of: ${VALID_SOURCE_TYPES.join(', ')}` }, 400, req);
-      }
-
-      const existing = db.prepare(`
-        SELECT id FROM revenue WHERE idempotency_key = ?
-      `).get(idempotencyKey) as any;
-      if (existing) {
-        return sendJson(res, { success: true, id: existing.id, duplicate: true }, 200, req);
-      }
-
-      const result = db.prepare(`
-        INSERT INTO revenue (source_type, source_name, amount, currency, revenue_date, description, idempotency_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(body.source_type, body.source_name, body.amount, body.currency || 'THB', body.revenue_date, body.description || null, idempotencyKey);
-
-      return sendJson(res, { success: true, id: result.lastInsertRowid }, 200, req);
+    // POST /api/webhook/analytics, /api/webhook/revenue - retired: assets and revenue live in the CRM
+    if ((path === '/api/webhook/analytics' || path === '/api/webhook/revenue') && method === 'POST') {
+      return sendJson(res, { error: 'Gone: assets and revenue moved to the CRM' }, 410, req);
     }
 
     // =====================================================
@@ -1568,10 +1347,6 @@ async function startServer() {
   if (process.env.NODE_ENV === 'production' && !authConfigurationPresent()) {
     console.error('ERROR: API_TOKEN or API_TOKENS_JSON is required in production mode');
     console.error('Set a legacy API_TOKEN or provision scoped token hashes before starting production');
-    process.exit(1);
-  }
-  if (process.env.NODE_ENV === 'production' && financeRateLimitConfigurationError()) {
-    console.error('ERROR: Finance API rate-limit configuration is invalid in production mode');
     process.exit(1);
   }
   if (process.env.NODE_ENV === 'production' && AI_RATE_LIMITER.status().configuration_error) {

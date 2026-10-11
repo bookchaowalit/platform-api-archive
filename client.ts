@@ -390,21 +390,6 @@ export interface Skill {
   hours_invested: number;
 }
 
-export interface Asset {
-  id: number;
-  name: string;
-  type: string;
-  description: string | null;
-  url: string | null;
-  platform: string | null;
-  status: string;
-  monthly_value: number | null;
-  total_value: number | null;
-  views: number;
-  subscribers: number;
-  revenue: number;
-}
-
 export interface Content {
   id: number;
   title: string;
@@ -482,18 +467,6 @@ class SoloEmpireAPI {
    */
   async getSkill(slug: string): Promise<{ skill: Skill }> {
     return this.fetch(`/api/skills/${slug}`);
-  }
-
-  /**
-   * ดึง Assets ทั้งหมด
-   */
-  async getAssets(params?: { type?: string; status?: string }): Promise<{ assets: Asset[] }> {
-    const queryParams = new URLSearchParams();
-    if (params?.type) queryParams.append('type', params.type);
-    if (params?.status) queryParams.append('status', params.status);
-
-    const query = queryParams.toString();
-    return this.fetch(`/api/assets${query ? `?${query}` : ''}`);
   }
 
   /**

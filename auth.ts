@@ -111,7 +111,6 @@ function sameHash(left: string, right: string): boolean {
 function scopeAllows(scopes: string[], requiredScope: string): boolean {
   if (scopes.includes('*') || scopes.includes(requiredScope)) return true;
   if (requiredScope === 'api:read' && scopes.includes('api:write')) return true;
-  if (requiredScope === 'finance:read' && scopes.includes('finance:write')) return true;
   return false;
 }
 
