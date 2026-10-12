@@ -257,7 +257,7 @@ def test_auth_rejection(base_url: str):
 
 
 def test_ai_gateway(base_url: str, api_token: str):
-    """The local AI routes were retired: generation lives in solo-ai-gateway (2026-10-11)."""
+    """The local AI routes were retired: generation lives in ai-gateway (2026-10-11)."""
     print("\n[3/8] Retired AI routes")
     try:
         status = requests.get(f"{base_url}/api/ai/status", timeout=2)

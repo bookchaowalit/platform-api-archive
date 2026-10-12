@@ -538,7 +538,7 @@ async function handleRequestInner(req: any, res: any, url: URL) {
   }
 
   try {
-    // /api/ai/* - retired: generation, spend, budget and telemetry live in solo-ai-gateway
+    // /api/ai/* - retired: generation, spend, budget and telemetry live in ai-gateway
     if (path === '/api/ai/status' && method === 'GET') {
       return sendJson(res, { error: 'Gone: AI generation moved to solo-ai-gateway' }, 410, req);
     }
@@ -606,7 +606,7 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       return sendJson(res, { error: 'Gone: assets moved to the CRM' }, 410, req);
     }
 
-    // GET /api/content, /api/content/:slug - retired: content lives in the solo-content cell
+    // GET /api/content, /api/content/:slug - retired: content lives in the content cell
     if (path === '/api/content' && method === 'GET') {
       return sendJson(res, { error: 'Gone: content moved to the solo-content cell' }, 410, req);
     }
@@ -971,7 +971,7 @@ async function handleRequestInner(req: any, res: any, url: URL) {
       return sendJson(res, { error: 'Gone: the local profile and social links were retired with the SQLite database' }, 410, req);
     }
 
-    // POST /api/sync/content - retired: content lives in the solo-content cell
+    // POST /api/sync/content - retired: content lives in the content cell
     if (path === '/api/sync/content' && method === 'POST') {
       return sendJson(res, { error: 'Gone: content moved to the solo-content cell' }, 410, req);
     }
