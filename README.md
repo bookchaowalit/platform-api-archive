@@ -3,7 +3,7 @@
 Archived copy of solo-empire `infra/api/` (REST server `server.ts`, auth, rate limit, LINE/Stripe webhooks,
 OpenTelemetry, and the `platform/` building blocks: identity verify, Thai tax/invoice preview, email, presigned files)
 with its history (subtree split, 2026-10-11). solo-empire's local runtime (`infra/api`, `infra/dashboard`) was retired
-the same day; domain data lives in the cell APIs and the web surface is `bookchaowalit/owner-web`.
+the same day; domain data lives in the cell APIs and the web surface is `bookchaowalit/life-dashboard-web`.
 
 - Not runnable standalone: it was built for the solo-empire `infra/` tree (imports `../database`, `../platform/*.yaml`,
   `../mcp-server` stores). `tests/` are the copies of `infra/tests/api/*` kept only for reference.
